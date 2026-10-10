@@ -1,5 +1,7 @@
 # VaultSync
 
+> **Status:** Under development. VaultSync is a personal password manager for securely storing and synchronizing credentials across trusted devices.
+
 [![Tests](https://github.com/vaultsync/vaultsync/actions/workflows/tests.yml/badge.svg)](https://github.com/vaultsync/vaultsync/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
