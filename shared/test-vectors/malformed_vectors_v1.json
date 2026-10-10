@@ -1,0 +1,40 @@
+{
+  "description": "Adversarial and Malformed Vectors for VaultSync v1",
+  "cases": [
+    {
+      "name": "corrupted_ciphertext",
+      "expected_error": "DecryptionFailedError",
+      "payload": "{\"version\": 1, \"algorithm\": \"AES-256-GCM\", \"record_id\": \"d3b07384-d113-4674-8b6a-939e144a14d5\", \"nonce\": \"Hh8gISIjJCUmJygp\", \"ciphertext\": \"14tswzgnqYaM5sQrCYVhCUar0ud20KL1Qjk54enfL5TcVbkn7t5kU09WU4qTXlmbSFUeiJkXFlqF14/eDKFTJ2bkeSoHYd9L12n8kRqxWUN4DQ81sJzLif1PoX+4YRkfhYkPX48=\"}"
+    },
+    {
+      "name": "corrupted_tag",
+      "expected_error": "DecryptionFailedError",
+      "payload": "{\"version\": 1, \"algorithm\": \"AES-256-GCM\", \"record_id\": \"d3b07384-d113-4674-8b6a-939e144a14d5\", \"nonce\": \"Hh8gISIjJCUmJygp\", \"ciphertext\": \"14tswzgmqYaM5sQrCYVhCUar0ud20KL1Qjk54enfL5TcVbkn7t5kU09WU4qTXlmbSFUeiJkXFlqF14/eDKFTJ2bkeSoHYd9L12n8kRqxWUN4DQ81sJzLif1PoX+4YRkfhYkPX44=\"}"
+    },
+    {
+      "name": "swapped_record_id",
+      "expected_error": "DecryptionFailedError",
+      "payload": "{\"version\": 1, \"algorithm\": \"AES-256-GCM\", \"record_id\": \"00000000-0000-0000-0000-000000000000\", \"nonce\": \"Hh8gISIjJCUmJygp\", \"ciphertext\": \"14tswzgmqYaM5sQrCYVhCUar0ud20KL1Qjk54enfL5TcVbkn7t5kU09WU4qTXlmbSFUeiJkXFlqF14/eDKFTJ2bkeSoHYd9L12n8kRqxWUN4DQ81sJzLif1PoX+4YRkfhYkPX48=\"}"
+    },
+    {
+      "name": "corrupted_nonce",
+      "expected_error": "DecryptionFailedError",
+      "payload": "{\"version\": 1, \"algorithm\": \"AES-256-GCM\", \"record_id\": \"d3b07384-d113-4674-8b6a-939e144a14d5\", \"nonce\": \"4R8gISIjJCUmJygp\", \"ciphertext\": \"14tswzgmqYaM5sQrCYVhCUar0ud20KL1Qjk54enfL5TcVbkn7t5kU09WU4qTXlmbSFUeiJkXFlqF14/eDKFTJ2bkeSoHYd9L12n8kRqxWUN4DQ81sJzLif1PoX+4YRkfhYkPX48=\"}"
+    },
+    {
+      "name": "unsupported_version",
+      "expected_error": "UnsupportedVersionError",
+      "payload": "{\"version\": 99, \"algorithm\": \"AES-256-GCM\", \"record_id\": \"d3b07384-d113-4674-8b6a-939e144a14d5\", \"nonce\": \"Hh8gISIjJCUmJygp\", \"ciphertext\": \"14tswzgmqYaM5sQrCYVhCUar0ud20KL1Qjk54enfL5TcVbkn7t5kU09WU4qTXlmbSFUeiJkXFlqF14/eDKFTJ2bkeSoHYd9L12n8kRqxWUN4DQ81sJzLif1PoX+4YRkfhYkPX48=\"}"
+    },
+    {
+      "name": "unsupported_algorithm",
+      "expected_error": "UnsupportedAlgorithmError",
+      "payload": "{\"version\": 1, \"algorithm\": \"CHACHA20-POLY1305\", \"record_id\": \"d3b07384-d113-4674-8b6a-939e144a14d5\", \"nonce\": \"Hh8gISIjJCUmJygp\", \"ciphertext\": \"14tswzgmqYaM5sQrCYVhCUar0ud20KL1Qjk54enfL5TcVbkn7t5kU09WU4qTXlmbSFUeiJkXFlqF14/eDKFTJ2bkeSoHYd9L12n8kRqxWUN4DQ81sJzLif1PoX+4YRkfhYkPX48=\"}"
+    },
+    {
+      "name": "unsafe_kdf_memory_cost",
+      "expected_error": "InvalidParameterError",
+      "payload": "{\"version\": 1, \"algorithm\": \"AES-256-GCM\", \"kdf\": {\"algorithm\": \"Argon2id\", \"memory_cost\": 1048576, \"time_cost\": 3, \"parallelism\": 4, \"salt\": \"VmF1bHRTeW5jVGVzdFNsdA==\"}, \"nonce\": \"EBESExQVFhcYGRob\", \"ciphertext\": \"o4ouOLzlar1ABYQAKNc/7udg52skdkyMWhkIbVSiH6UMMF2hCiDApyJ3HLCs8QDl\"}"
+    }
+  ]
+}

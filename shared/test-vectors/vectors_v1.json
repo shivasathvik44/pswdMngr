@@ -1,0 +1,47 @@
+{
+  "description": "VaultSync Cryptographic Golden Test Vectors v1 (Synthetic Non-Secret Data)",
+  "version": 1,
+  "cipher_algorithm": "AES-256-GCM",
+  "kdf_algorithm": "Argon2id",
+  "kdf_parameters": {
+    "memory_cost_kib": 65536,
+    "time_cost": 3,
+    "parallelism": 4,
+    "salt_base64": "VmF1bHRTeW5jVGVzdFNsdA==",
+    "salt_hex": "5661756c7453796e6354657374536c74"
+  },
+  "inputs": {
+    "master_password_plain": "TestMasterPassword123!",
+    "master_password_normalized_utf8_hex": "546573744d617374657250617373776f726431323321"
+  },
+  "derived_keys": {
+    "master_secret_hex": "2fc420a8912a5c53f182e9079e5701e2bc747a41622e0af7fdade886576baafe",
+    "master_secret_base64": "L8QgqJEqXFPxgukHnlcB4rx0ekFiLgr3/a3ohldrqv4=",
+    "kek_hex": "d0aa589af4f49f360f4f61d4ebfee957b8c36da8831715368c7770ab7c56f4ed",
+    "kek_base64": "0KpYmvT0nzYPT2HU6/7pV7jDbaiDFxU2jHdwq3xW9O0=",
+    "kek_domain_label": "vaultsync:kek:v1",
+    "auth_secret_hex": "a69d2e3fe8dbffed46055f893debb4bed109d605d876898779d1d2f94149298b",
+    "auth_secret_base64": "pp0uP+jb/+1GBV+JPeu0vtEJ1gXYdomHedHS+UFJKYs=",
+    "auth_domain_label": "vaultsync:auth:v1"
+  },
+  "vault_key_wrapping": {
+    "vault_key_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "vault_key_base64": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+    "nonce_hex": "101112131415161718191a1b",
+    "nonce_base64": "EBESExQVFhcYGRob",
+    "associated_data_utf8": "vaultsync:key-wrap:v1:Argon2id",
+    "ciphertext_and_tag_hex": "a38a2e38bce56abd4005840028d73feee760e76b24764c8c5a19086d54a21fa50c305da10a20c0a722771cb0acf100e5",
+    "ciphertext_and_tag_base64": "o4ouOLzlar1ABYQAKNc/7udg52skdkyMWhkIbVSiH6UMMF2hCiDApyJ3HLCs8QDl",
+    "envelope_json": "{\"version\":1,\"algorithm\":\"AES-256-GCM\",\"kdf\":{\"algorithm\":\"Argon2id\",\"memory_cost\":65536,\"time_cost\":3,\"parallelism\":4,\"salt\":\"VmF1bHRTeW5jVGVzdFNsdA==\"},\"nonce\":\"EBESExQVFhcYGRob\",\"ciphertext\":\"o4ouOLzlar1ABYQAKNc/7udg52skdkyMWhkIbVSiH6UMMF2hCiDApyJ3HLCs8QDl\"}"
+  },
+  "record_encryption": {
+    "record_id": "d3b07384-d113-4674-8b6a-939e144a14d5",
+    "plaintext_utf8": "{\"title\":\"Demo Site\",\"username\":\"alice@example.com\",\"password\":\"SyntheticSecret987!\"}",
+    "nonce_hex": "1e1f20212223242526272829",
+    "nonce_base64": "Hh8gISIjJCUmJygp",
+    "associated_data_utf8": "vaultsync:record:v1:d3b07384-d113-4674-8b6a-939e144a14d5",
+    "ciphertext_and_tag_hex": "d78b6cc33826a9868ce6c42b0985610946abd2e776d0a2f5423939e1e9df2f94dc55b927eede64534f56538a935e599b48551e889917165a85d78fde0ca1532766e4792a0761df4bd769fc911ab15943780d0f35b09ccb89fd4fa17fb861191f85890f5f8f",
+    "ciphertext_and_tag_base64": "14tswzgmqYaM5sQrCYVhCUar0ud20KL1Qjk54enfL5TcVbkn7t5kU09WU4qTXlmbSFUeiJkXFlqF14/eDKFTJ2bkeSoHYd9L12n8kRqxWUN4DQ81sJzLif1PoX+4YRkfhYkPX48=",
+    "envelope_json": "{\"version\":1,\"algorithm\":\"AES-256-GCM\",\"record_id\":\"d3b07384-d113-4674-8b6a-939e144a14d5\",\"nonce\":\"Hh8gISIjJCUmJygp\",\"ciphertext\":\"14tswzgmqYaM5sQrCYVhCUar0ud20KL1Qjk54enfL5TcVbkn7t5kU09WU4qTXlmbSFUeiJkXFlqF14/eDKFTJ2bkeSoHYd9L12n8kRqxWUN4DQ81sJzLif1PoX+4YRkfhYkPX48=\"}"
+  }
+}
