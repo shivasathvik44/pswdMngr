@@ -100,3 +100,23 @@ This document identifies security boundaries, adversaries, potential threats, de
   - Structured logging filters that forbid dumping request bodies or decrypted contents.
   - Sanitized exception handlers that return generic error messages to clients while logging safe tracebacks.
   - Synthetic dummy credentials only in automated test suites and documentation.
+
+---
+
+## 3. Phase 3 Backend and Session Security Controls
+
+### 3.1 Token Verifiers Instead of Plaintext Tokens
+- **Threat**: Attacker acquires a server database dump containing active session records.
+- **Mitigation**: The `sessions` table persists only `token_hash = SHA-256(session_token)`. The raw bearer token is never written to disk, preventing session hijacking from static database dumps.
+
+### 3.2 Cross-Account Record Isolation
+- **Threat**: User B guesses or acquires a record UUID belonging to User A and attempts to read or mutate it.
+- **Mitigation**: Every record query strictly checks `account_id == current_user.id`. Access attempts to unowned records return generic `404 Not Found`, denying unauthorized access while concealing record existence.
+
+### 3.3 Optimistic Concurrency and Conflict Avoidance
+- **Threat**: Stale client modifies a record, overwriting newer changes made by another device.
+- **Mitigation**: `PUT /api/v1/records/{record_id}` requires `expected_revision`. Stale updates return `409 Conflict`, requiring the client to fetch the current revision and fork or resolve.
+
+### 3.4 Rate Limiting on Authentication Endpoints
+- **Threat**: Automated brute-force credential guessing against `/api/v1/auth/login`.
+- **Mitigation**: Sliding-window rate limiter tracks failed attempts per IP and username, triggering `429 Too Many Requests` when thresholds are exceeded.

@@ -1,6 +1,6 @@
 # VaultSync
 
-> **Status:** Under development. VaultSync is a personal password manager for securely storing and synchronizing credentials across trusted devices.
+> **Status:** Under active development. VaultSync is a personal password manager for securely storing and synchronizing credentials across trusted devices.
 
 [![Tests](https://github.com/vaultsync/vaultsync/actions/workflows/tests.yml/badge.svg)](https://github.com/vaultsync/vaultsync/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -12,13 +12,15 @@
 
 ## Key Highlights
 
-- **Zero-Knowledge Security**: The server stores only ciphertext blobs and wrapped cryptographic keys. Master passwords and vault contents are never exposed to the server or network.
-- **Private Mesh Connectivity**: Designed specifically for private network overlays (Tailscale or WireGuard) with secure loopback/VPN bindings.
+- **Zero-Knowledge Security**: The server stores only ciphertext blobs, user salts, and wrapped cryptographic keys. Master passwords and vault contents are never exposed to the server or network.
+- **Credential Separation**: Server authentication credentials (`auth_secret`) are derived via HKDF domain separation distinct from the local Key-Encryption Key (KEK).
+- **Private Mesh Connectivity**: Designed specifically for private network overlays (Tailscale or WireGuard) with secure loopback/VPN bindings (`127.0.0.1`).
+- **Offline-First Synchronization**: Full offline read/write access with version cursors, optimistic concurrency conflict detection, and deletion tombstones.
+- **Session Protection**: Bearer tokens are stored in the database strictly as SHA-256 verifier hashes, preventing session hijacking from static database dumps.
 - **Native Dual Clients**:
   - **Fedora Linux Desktop**: Fast, responsive GUI written in Python and PySide6 with auto-lock and secure memory management.
   - **Android Mobile**: Native Kotlin application with Jetpack Compose, Android Keystore protection, biometric unlock, and native Android Autofill integration.
-- **Offline-First Resilience**: Full offline read/write access with version cursors, conflict detection, and tombstone propagation.
-- **Audited Cryptographic Primitives**: Standardized Argon2id key derivation and AES-256-GCM / XChaCha20-Poly1305 authenticated encryption.
+- **Audited Cryptographic Primitives**: Standardized Argon2id key derivation and AES-256-GCM authenticated encryption.
 - **Transparent & Self-Hosted**: Operates directly on standard Linux distributions without requiring Docker or third-party cloud infrastructure.
 
 ---
@@ -31,18 +33,20 @@ vaultsync/
 ├── SECURITY.md               # Security policy and vulnerability disclosure
 ├── CONTRIBUTING.md           # Contribution guidelines and standards
 ├── LICENSE                   # MIT License
-├── .gitignore                # Git ignore rules for secrets and builds
+├── .gitignore                # Git ignore rules for secrets, DBs, and builds
 ├── docs/                     # Architectural and security documentation
-│   ├── architecture.md       # System design and Mermaid diagrams
+│   ├── architecture.md       # System design, ER diagrams, and Mermaid flows
 │   ├── threat-model.md       # Comprehensive threat modeling
 │   ├── cryptography.md       # Protocol specification and cryptographic algorithms
-│   ├── api-spec.md           # Sync API endpoint specifications
+│   ├── api-spec.md           # Complete sync API specification
 │   ├── recovery.md           # Backup and disaster recovery procedures
 │   └── decisions/            # Architecture Decision Records (ADRs)
 ├── server/                   # FastAPI backend synchronization service
+│   ├── alembic.ini           # Database migration configuration
+│   ├── alembic/              # Versioned database migration scripts
 │   ├── pyproject.toml        # Backend dependencies and metadata
-│   ├── src/vaultsync_server/ # Server application source
-│   └── tests/                # Automated pytest suite
+│   ├── src/vaultsync_server/ # Server application source (API, Crypto, DB, Services)
+│   └── tests/                # Automated pytest suite (Crypto, Health, Backend)
 ├── desktop/                  # Fedora desktop client (PySide6)
 │   ├── pyproject.toml        # Desktop client dependencies
 │   ├── src/vaultsync_desktop/# Desktop GUI application source
@@ -52,7 +56,7 @@ vaultsync/
 │   └── app/                  # Android application module
 ├── shared/                   # Cross-platform shared definitions
 │   ├── api-schema/           # Canonical API schemas
-│   └── test-vectors/         # Cross-language cryptographic test vectors
+│   └── test-vectors/         # Cross-language cryptographic test vectors & Kotlin spec
 └── .github/                  # GitHub Actions CI/CD workflows
     └── workflows/
         └── tests.yml         # Automated CI test runner
@@ -60,7 +64,7 @@ vaultsync/
 
 ---
 
-## Quick Start (Phase 1: Backend Foundation)
+## Quick Start (Backend and Migrations)
 
 ### Prerequisites
 
@@ -68,7 +72,7 @@ vaultsync/
 - Python 3.12+ (tested on Python 3.14)
 - Git
 
-### Installation & Test Execution
+### Installation & Environment Setup
 
 ```bash
 # Clone repository
@@ -80,16 +84,28 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 # Install dependencies and server package
-pip install -e server[dev]
-
-# Run automated tests
-pytest server/tests
+pip install -e "server[dev]"
 ```
 
-### Running the Development Server
+### Database Migrations
+
+Apply database schema migrations via Alembic:
 
 ```bash
-# Start backend on 127.0.0.1:8000
+alembic -c server/alembic.ini upgrade head
+```
+
+### Running the Automated Test Suite
+
+```bash
+# Run all tests (Crypto, Health, Database, Sync, Migrations)
+pytest server/tests -v
+```
+
+### Starting the Local Development Server
+
+```bash
+# Start backend strictly on 127.0.0.1:8000
 python3 -m uvicorn vaultsync_server.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -104,8 +120,8 @@ curl -s http://127.0.0.1:8000/health
 ## Project Roadmap
 
 - [x] **Phase 1: Foundation**: Repository setup, FastAPI health API, automated tests, architecture design, and threat model.
-- [ ] **Phase 2: Cryptographic Prototype**: Key wrapping, Argon2id derivation, authenticated encryption, and cross-language test vectors.
-- [ ] **Phase 3: Backend Synchronization**: Database schema, device session management, conflict resolution, and tombstone tracking.
+- [x] **Phase 2: Cryptographic Prototype**: Key wrapping, Argon2id derivation, authenticated encryption, and cross-language test vectors.
+- [x] **Phase 3: Secure Backend Synchronization**: Database persistence (SQLAlchemy/Alembic), credential separation, session verification, optimistic concurrency control, and tombstone synchronization.
 - [ ] **Phase 4: Fedora Desktop Client**: PySide6 GUI, local encrypted cache, password generator, and sync worker.
 - [ ] **Phase 5: Android Mobile Client**: Compose UI, Android Keystore, biometric authentication, Room DB, and Autofill service.
 - [ ] **Phase 6: Integration & Hardening**: End-to-end sync over Tailscale/WireGuard, systemd hardening, backup/restore verification, and security verification.

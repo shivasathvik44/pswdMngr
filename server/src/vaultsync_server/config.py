@@ -30,11 +30,17 @@ class Settings(BaseSettings):
     # API routing
     api_v1_prefix: str = "/api/v1"
     
-    # Database URL placeholder for future backend phases
+    # Database configuration
     database_url: str = Field(
         default="sqlite:///./vaultsync.db",
         description="SQLAlchemy database URL",
     )
+
+    # Session & Security policy
+    session_expiry_hours: int = Field(default=168, description="Session lifetime in hours (default: 7 days)")
+    rate_limit_max_attempts: int = Field(default=10, description="Max failed auth attempts within window")
+    rate_limit_window_seconds: int = Field(default=60, description="Rate limit evaluation window in seconds")
+    max_payload_size_bytes: int = Field(default=2097152, description="Max request payload size (2 MiB)")
 
 
 settings = Settings()

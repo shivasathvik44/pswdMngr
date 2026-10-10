@@ -5,10 +5,13 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from vaultsync_server.api.auth import router as auth_router
 from vaultsync_server.api.health import router as health_router
+from vaultsync_server.api.records import router as records_router
+from vaultsync_server.api.sessions import router as sessions_router
+from vaultsync_server.api.sync import router as sync_router
 from vaultsync_server.config import settings
 
 # Configure structured logging
@@ -56,12 +59,18 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Middleware
+    # Defensive headers middleware
     app.add_middleware(SecurityHeadersMiddleware)
 
-    # Root health endpoint and versioned API health endpoint
+    # Root health endpoint
     app.include_router(health_router)
+
+    # API v1 endpoints
     app.include_router(health_router, prefix=settings.api_v1_prefix)
+    app.include_router(auth_router, prefix=settings.api_v1_prefix)
+    app.include_router(sessions_router, prefix=settings.api_v1_prefix)
+    app.include_router(records_router, prefix=settings.api_v1_prefix)
+    app.include_router(sync_router, prefix=settings.api_v1_prefix)
 
     return app
 
