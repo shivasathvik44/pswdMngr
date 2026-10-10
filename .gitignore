@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Database and secrets (Zero Knowledge & Privacy)
+*.db
+*.sqlite
+*.sqlite3
+*.session
+*.log
+*.key
+*.pem
+*.pfx
+secrets/
+.env
+.env.*
+!.env.example
+
+# Desktop & IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Android & Gradle
+android/.gradle/
+android/build/
+android/*/build/
+android/local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
