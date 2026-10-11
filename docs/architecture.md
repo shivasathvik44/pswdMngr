@@ -144,3 +144,63 @@ erDiagram
 - Enforces multi-tenant isolation via compound unique constraint `(account_id, record_id)`.
 - **Optimistic Concurrency**: Tracks per-record monotonic `revision`. Updates require matching `expected_revision`.
 - **Tombstones**: Record deletions set `is_deleted = true`, purge `ciphertext_payload = ""`, and increment `revision` and `sync_cursor`.
+
+---
+
+## Desktop Client Architecture (Phase 4)
+
+The Fedora Linux desktop client is implemented in Python 3.12+ and PySide6 (Qt 6.12+), adhering strictly to zero-knowledge guarantees:
+
+```mermaid
+flowchart TD
+    subgraph GUI["PySide6 UI Thread (Main)"]
+        MainWindow["MainWindow (Navigation & ActivityFilter)"]
+        Screens["Screens (Server, Register, Login, Vault, Settings)"]
+        Widgets["Widgets (PasswordEdit, PassphraseStrengthBar)"]
+        MainWindow --> Screens
+        Screens --> Widgets
+    end
+
+    subgraph AsyncBridge["Async Bridge (Dedicated Worker Thread)"]
+        Dispatcher["AsyncDispatcher (Dedicated asyncio loop)"]
+        APICall["vaultsync_desktop.api_client.ApiClient"]
+    end
+
+    subgraph Core["Local Core & Security"]
+        Session["VaultSession (In-Memory Key & Records)"]
+        Crypto["vaultsync_desktop.crypto (Argon2id + AES-256-GCM)"]
+        Keyring["TokenStorage (FreeDesktop Secret Service / Keyring)"]
+        Config["AppConfig (~/.config/vaultsync/config.json)"]
+    end
+
+    subgraph Backend["Remote/Local Backend"]
+        FastAPI["VaultSync FastAPI Backend (Loopback or HTTPS)"]
+    end
+
+    MainWindow -->|User Actions| Session
+    Session -->|Async Tasks| Dispatcher
+    Dispatcher -->|Network IO| APICall
+    APICall -->|HTTPX Client| FastAPI
+    Session -->|Key Derivation / Decryption| Crypto
+    Session -->|Session Token Storage| Keyring
+    MainWindow -->|Preferences| Config
+    Dispatcher -.->|Qt Signals (sig_success, sig_error)| GUI
+```
+
+### Key Components
+
+1. **`AsyncDispatcher` & Non-blocking GUI Execution**:
+   - Heavy network I/O and CPU-bound Argon2id operations run off the Qt GUI thread using a dedicated background asyncio thread.
+   - Qt signals (`sig_success`, `sig_error`, `sig_finally`) marshal results back to the main thread, keeping the desktop UI responsive at 60 FPS without frame drops.
+
+2. **Session & Token Storage (`TokenStorage`)**:
+   - Session tokens are stored in the FreeDesktop Secret Service / GNOME Keyring via Python `keyring` (`service_name="vaultsync"`).
+   - If no system keyring service is detected, fallback to volatile memory occurs with an explicit user notification.
+
+3. **Inactivity Monitoring & Auto-Lock**:
+   - `MainWindow` installs an application-level `ActivityFilter` intercepting all mouse and keyboard events.
+   - A timer periodically monitors inactivity. If idle duration exceeds the configured timeout (default: 5 minutes), `VaultSession.lock()` is triggered automatically.
+
+4. **Key Zeroization & Memory Limitations**:
+   - On vault lock, the raw 256-bit VEK and decrypted plaintext records are zeroed out in memory via `ctypes.memset` / `bytearray` zeroization.
+   - Python runtime memory limitations (garbage collection copies, immutable string internals) are explicitly documented; users requiring kernel-enforced memory bounds are guided accordingly.

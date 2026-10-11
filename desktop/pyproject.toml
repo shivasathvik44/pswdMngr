@@ -26,5 +26,12 @@ dev = [
     "pytest-qt>=4.4.0",
 ]
 
+[project.scripts]
+vaultsync-desktop = "vaultsync_desktop.main:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+testpaths = ["tests"]

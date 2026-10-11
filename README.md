@@ -111,8 +111,14 @@ echo -n "NewSecurePassword2026!" | python -m vaultsync_server.scripts.admin_rese
 ### Running the Automated Test Suite
 
 ```bash
-# Run all tests (Crypto, Health, Database, Sync, Rate Limiting, Two-Credential)
+# Run server tests
 pytest server/tests -v
+
+# Run desktop tests (headless/offscreen)
+QT_QPA_PLATFORM=offscreen pytest desktop/tests -v
+
+# Run full combined suite (75 tests)
+QT_QPA_PLATFORM=offscreen pytest --import-mode=importlib server/tests desktop/tests -v
 ```
 
 ### Starting the Local Development Server
@@ -128,6 +134,16 @@ curl -s http://127.0.0.1:8000/health
 # Output: {"status":"ok","version":"0.1.0","environment":"development","timestamp":"..."}
 ```
 
+### Starting the Fedora Desktop Client
+
+```bash
+# Install desktop client package
+pip install -e "desktop[dev]"
+
+# Launch GUI client connecting to local backend
+vaultsync-desktop --server http://127.0.0.1:8000
+```
+
 ---
 
 ## Project Roadmap
@@ -137,6 +153,6 @@ curl -s http://127.0.0.1:8000/health
 - [x] **Phase 3: Secure Backend Synchronization**: Database persistence (SQLAlchemy/Alembic), session verification, optimistic concurrency control, and tombstone synchronization.
 - [x] **Phase 3.1: Security Review**: Offline master-password cracking vulnerability proof, dual-axis rate limiting, and sync transaction boundaries.
 - [x] **Phase 3.2: Two-Credential Security Migration**: Complete credential separation ($P_{\text{account}}$ vs $P_{\text{vault}}$), Alembic migration 0002, password change and admin recovery, and 100% security regression testing.
-- [ ] **Phase 4: Fedora Desktop Client**: PySide6 GUI, local encrypted cache, password generator, and sync worker.
+- [x] **Phase 4: Fedora Desktop Client**: PySide6 native GUI, two-credential separation, Secret Service session keyring, auto-lock, and offline/remote sync.
 - [ ] **Phase 5: Android Mobile Client**: Compose UI, Android Keystore, biometric authentication, Room DB, and Autofill service.
 - [ ] **Phase 6: Integration & Hardening**: End-to-end sync over Tailscale/WireGuard, systemd hardening, backup/restore verification, and security verification.
