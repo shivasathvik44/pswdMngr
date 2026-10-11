@@ -7,6 +7,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -21,22 +22,27 @@ from vaultsync_server.db.base import Base
 
 
 class Account(Base):
-    """User account entity.
+    """User account entity adhering to the Two-Credential security model.
     
-    Stores authentication hashes (derived from auth_secret, NOT the master password),
-    the user's KDF salt for client key derivation, and the encrypted wrapped vault key.
-    Never stores master passwords or plaintext vault encryption keys.
+    Stores:
+    - account_password_hash: Argon2id hash of the server account password.
+    - kdf_salt: Public client-side salt used by client for vault master password KEK derivation.
+    - wrapped_vault_key: Client-encrypted WrappedKeyEnvelope JSON.
+    - sync_cursor: Monotonically increasing mutation sequence counter.
+    
+    The server NEVER receives or stores the vault master password, KEK, or VEK.
     """
 
     __tablename__ = "accounts"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     username: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
-    auth_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    account_password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     kdf_salt: Mapped[str] = mapped_column(String(64), nullable=False)
     wrapped_vault_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     sync_cursor: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    requires_password_migration: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -145,3 +151,13 @@ class EncryptedRecord(Base):
     )
 
     account: Mapped["Account"] = relationship("Account", back_populates="records")
+
+
+class AuthRateLimit(Base):
+    """Database-backed rate limit event log for multi-worker abuse prevention."""
+
+    __tablename__ = "auth_rate_limits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    identifier: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    attempt_time: Mapped[float] = mapped_column(Float, index=True, nullable=False)

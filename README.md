@@ -13,10 +13,11 @@
 ## Key Highlights
 
 - **Zero-Knowledge Security**: The server stores only ciphertext blobs, user salts, and wrapped cryptographic keys. Master passwords and vault contents are never exposed to the server or network.
-- **Credential Separation**: Server authentication credentials (`auth_secret`) are derived via HKDF domain separation distinct from the local Key-Encryption Key (KEK).
+- **Two-Credential Architecture**: Complete mathematical separation between the server Account Password ($P_{\text{account}}$) and client Vault Master Password ($P_{\text{vault}}$). Stolen server database dumps contain zero master password verifiers.
 - **Private Mesh Connectivity**: Designed specifically for private network overlays (Tailscale or WireGuard) with secure loopback/VPN bindings (`127.0.0.1`).
 - **Offline-First Synchronization**: Full offline read/write access with version cursors, optimistic concurrency conflict detection, and deletion tombstones.
 - **Session Protection**: Bearer tokens are stored in the database strictly as SHA-256 verifier hashes, preventing session hijacking from static database dumps.
+- **Abuse Control**: Dual-axis rate limiting across IP addresses and usernames, backed by database tracking for multi-worker support.
 - **Native Dual Clients**:
   - **Fedora Linux Desktop**: Fast, responsive GUI written in Python and PySide6 with auto-lock and secure memory management.
   - **Android Mobile**: Native Kotlin application with Jetpack Compose, Android Keystore protection, biometric unlock, and native Android Autofill integration.
@@ -46,7 +47,7 @@ vaultsync/
 │   ├── alembic/              # Versioned database migration scripts
 │   ├── pyproject.toml        # Backend dependencies and metadata
 │   ├── src/vaultsync_server/ # Server application source (API, Crypto, DB, Services)
-│   └── tests/                # Automated pytest suite (Crypto, Health, Backend)
+│   └── tests/                # Automated pytest suite (Crypto, Health, Backend, Two-Credential)
 ├── desktop/                  # Fedora desktop client (PySide6)
 │   ├── pyproject.toml        # Desktop client dependencies
 │   ├── src/vaultsync_desktop/# Desktop GUI application source
@@ -95,10 +96,18 @@ Apply database schema migrations via Alembic:
 alembic -c server/alembic.ini upgrade head
 ```
 
+### Administrative Account Reset and Migration
+
+To reset an account password or migrate a legacy account without touching vault contents:
+
+```bash
+python -m vaultsync_server.scripts.admin_reset --username alice --password "NewSecurePassword2026!"
+```
+
 ### Running the Automated Test Suite
 
 ```bash
-# Run all tests (Crypto, Health, Database, Sync, Migrations)
+# Run all tests (Crypto, Health, Database, Sync, Rate Limiting, Two-Credential)
 pytest server/tests -v
 ```
 
@@ -121,7 +130,9 @@ curl -s http://127.0.0.1:8000/health
 
 - [x] **Phase 1: Foundation**: Repository setup, FastAPI health API, automated tests, architecture design, and threat model.
 - [x] **Phase 2: Cryptographic Prototype**: Key wrapping, Argon2id derivation, authenticated encryption, and cross-language test vectors.
-- [x] **Phase 3: Secure Backend Synchronization**: Database persistence (SQLAlchemy/Alembic), credential separation, session verification, optimistic concurrency control, and tombstone synchronization.
+- [x] **Phase 3: Secure Backend Synchronization**: Database persistence (SQLAlchemy/Alembic), session verification, optimistic concurrency control, and tombstone synchronization.
+- [x] **Phase 3.1: Security Review**: Offline master-password cracking vulnerability proof, dual-axis rate limiting, and sync transaction boundaries.
+- [x] **Phase 3.2: Two-Credential Security Migration**: Complete credential separation ($P_{\text{account}}$ vs $P_{\text{vault}}$), Alembic migration 0002, password change and admin recovery, and 100% security regression testing.
 - [ ] **Phase 4: Fedora Desktop Client**: PySide6 GUI, local encrypted cache, password generator, and sync worker.
 - [ ] **Phase 5: Android Mobile Client**: Compose UI, Android Keystore, biometric authentication, Room DB, and Autofill service.
 - [ ] **Phase 6: Integration & Hardening**: End-to-end sync over Tailscale/WireGuard, systemd hardening, backup/restore verification, and security verification.

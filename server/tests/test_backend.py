@@ -30,8 +30,8 @@ def synthetic_client_crypto():
     """Helper creating synthetic client-side credentials and records for tests."""
     vek = VaultKey.generate()
     salt = base64.b64encode(b"0123456789abcdef").decode("ascii")
-    # Synthetic auth_secret (as derived by client via HKDF-Expand)
-    auth_secret = "synthetic_auth_secret_client_derived_32b_hex"
+    # Synthetic account_password (independent server login credential)
+    account_password = "synthetic_account_password_123"
     
     def make_record(record_id: str, plaintext: str) -> str:
         envelope = encrypt_record(vek, record_id, plaintext)
@@ -40,7 +40,7 @@ def synthetic_client_crypto():
     return {
         "vek": vek,
         "salt": salt,
-        "auth_secret": auth_secret,
+        "account_password": account_password,
         "make_record": make_record,
     }
 
@@ -55,7 +55,7 @@ async def test_account_registration_and_login_success(
     synthetic_client_crypto,
 ):
     username = f"user_{uuid.uuid4().hex[:8]}"
-    auth_secret = synthetic_client_crypto["auth_secret"]
+    account_password = synthetic_client_crypto["account_password"]
     kdf_salt = synthetic_client_crypto["salt"]
 
     # 1. Register
@@ -63,7 +63,7 @@ async def test_account_registration_and_login_success(
         "/api/v1/auth/register",
         json={
             "username": username,
-            "auth_secret": auth_secret,
+            "account_password": account_password,
             "kdf_salt": kdf_salt,
         },
     )
@@ -78,7 +78,7 @@ async def test_account_registration_and_login_success(
         "/api/v1/auth/register",
         json={
             "username": username,
-            "auth_secret": auth_secret,
+            "account_password": account_password,
             "kdf_salt": kdf_salt,
         },
     )
@@ -89,12 +89,12 @@ async def test_account_registration_and_login_success(
     assert salt_res.status_code == 200
     assert salt_res.json()["kdf_salt"] == kdf_salt
 
-    # 4. Login with correct auth_secret
+    # 4. Login with correct account_password
     login_res = await async_client.post(
         "/api/v1/auth/login",
         json={
             "username": username,
-            "auth_secret": auth_secret,
+            "account_password": account_password,
             "device_name": "Fedora Workstation",
             "device_id": "laptop-1",
         },
@@ -117,7 +117,7 @@ async def test_login_invalid_credentials(async_client: AsyncClient, synthetic_cl
         "/api/v1/auth/register",
         json={
             "username": username,
-            "auth_secret": synthetic_client_crypto["auth_secret"],
+            "account_password": synthetic_client_crypto["account_password"],
             "kdf_salt": synthetic_client_crypto["salt"],
         },
     )
@@ -127,7 +127,7 @@ async def test_login_invalid_credentials(async_client: AsyncClient, synthetic_cl
         "/api/v1/auth/login",
         json={
             "username": username,
-            "auth_secret": "wrong_incorrect_auth_secret_val",
+            "account_password": "wrong_incorrect_account_password",
         },
     )
     assert res.status_code == 401
@@ -138,7 +138,7 @@ async def test_login_invalid_credentials(async_client: AsyncClient, synthetic_cl
         "/api/v1/auth/login",
         json={
             "username": "does_not_exist_user",
-            "auth_secret": "any_secret_val_12345678",
+            "account_password": "any_password_val_12345678",
         },
     )
     assert res_non_existent.status_code == 401
@@ -155,14 +155,14 @@ async def test_session_listing_and_revocation(async_client: AsyncClient, synthet
         "/api/v1/auth/register",
         json={
             "username": username,
-            "auth_secret": synthetic_client_crypto["auth_secret"],
+            "account_password": synthetic_client_crypto["account_password"],
             "kdf_salt": synthetic_client_crypto["salt"],
         },
     )
     # Login on device 1
     login1 = await async_client.post(
         "/api/v1/auth/login",
-        json={"username": username, "auth_secret": synthetic_client_crypto["auth_secret"], "device_name": "Laptop"},
+        json={"username": username, "account_password": synthetic_client_crypto["account_password"], "device_name": "Laptop"},
     )
     token1 = login1.json()["session_token"]
     session1_id = login1.json()["session_id"]
@@ -170,7 +170,7 @@ async def test_session_listing_and_revocation(async_client: AsyncClient, synthet
     # Login on device 2
     login2 = await async_client.post(
         "/api/v1/auth/login",
-        json={"username": username, "auth_secret": synthetic_client_crypto["auth_secret"], "device_name": "Phone"},
+        json={"username": username, "account_password": synthetic_client_crypto["account_password"], "device_name": "Phone"},
     )
     token2 = login2.json()["session_token"]
     session2_id = login2.json()["session_id"]
@@ -227,11 +227,11 @@ async def test_cross_account_isolation(async_client: AsyncClient, synthetic_clie
     alice_name = f"alice_{uuid.uuid4().hex[:6]}"
     await async_client.post(
         "/api/v1/auth/register",
-        json={"username": alice_name, "auth_secret": synthetic_client_crypto["auth_secret"], "kdf_salt": synthetic_client_crypto["salt"]},
+        json={"username": alice_name, "account_password": synthetic_client_crypto["account_password"], "kdf_salt": synthetic_client_crypto["salt"]},
     )
     login_alice = await async_client.post(
         "/api/v1/auth/login",
-        json={"username": alice_name, "auth_secret": synthetic_client_crypto["auth_secret"]},
+        json={"username": alice_name, "account_password": synthetic_client_crypto["account_password"]},
     )
     alice_token = login_alice.json()["session_token"]
 
@@ -239,11 +239,11 @@ async def test_cross_account_isolation(async_client: AsyncClient, synthetic_clie
     bob_name = f"bob_{uuid.uuid4().hex[:6]}"
     await async_client.post(
         "/api/v1/auth/register",
-        json={"username": bob_name, "auth_secret": synthetic_client_crypto["auth_secret"], "kdf_salt": synthetic_client_crypto["salt"]},
+        json={"username": bob_name, "account_password": synthetic_client_crypto["account_password"], "kdf_salt": synthetic_client_crypto["salt"]},
     )
     login_bob = await async_client.post(
         "/api/v1/auth/login",
-        json={"username": bob_name, "auth_secret": synthetic_client_crypto["auth_secret"]},
+        json={"username": bob_name, "account_password": synthetic_client_crypto["account_password"]},
     )
     bob_token = login_bob.json()["session_token"]
 
@@ -300,11 +300,11 @@ async def test_record_crud_and_optimistic_concurrency(
     username = f"user_{uuid.uuid4().hex[:6]}"
     await async_client.post(
         "/api/v1/auth/register",
-        json={"username": username, "auth_secret": synthetic_client_crypto["auth_secret"], "kdf_salt": synthetic_client_crypto["salt"]},
+        json={"username": username, "account_password": synthetic_client_crypto["account_password"], "kdf_salt": synthetic_client_crypto["salt"]},
     )
     login = await async_client.post(
         "/api/v1/auth/login",
-        json={"username": username, "auth_secret": synthetic_client_crypto["auth_secret"]},
+        json={"username": username, "account_password": synthetic_client_crypto["account_password"]},
     )
     token = login.json()["session_token"]
     auth_headers = {"Authorization": f"Bearer {token}"}
@@ -381,11 +381,11 @@ async def test_incremental_sync_and_pagination(
     username = f"user_{uuid.uuid4().hex[:6]}"
     await async_client.post(
         "/api/v1/auth/register",
-        json={"username": username, "auth_secret": synthetic_client_crypto["auth_secret"], "kdf_salt": synthetic_client_crypto["salt"]},
+        json={"username": username, "account_password": synthetic_client_crypto["account_password"], "kdf_salt": synthetic_client_crypto["salt"]},
     )
     login = await async_client.post(
         "/api/v1/auth/login",
-        json={"username": username, "auth_secret": synthetic_client_crypto["auth_secret"]},
+        json={"username": username, "account_password": synthetic_client_crypto["account_password"]},
     )
     auth_headers = {"Authorization": f"Bearer {login.json()['session_token']}"}
 
@@ -450,11 +450,11 @@ async def test_malformed_envelope_rejected_on_upload(async_client: AsyncClient, 
     username = f"user_{uuid.uuid4().hex[:6]}"
     await async_client.post(
         "/api/v1/auth/register",
-        json={"username": username, "auth_secret": synthetic_client_crypto["auth_secret"], "kdf_salt": synthetic_client_crypto["salt"]},
+        json={"username": username, "account_password": synthetic_client_crypto["account_password"], "kdf_salt": synthetic_client_crypto["salt"]},
     )
     login = await async_client.post(
         "/api/v1/auth/login",
-        json={"username": username, "auth_secret": synthetic_client_crypto["auth_secret"]},
+        json={"username": username, "account_password": synthetic_client_crypto["account_password"]},
     )
     auth_headers = {"Authorization": f"Bearer {login.json()['session_token']}"}
 

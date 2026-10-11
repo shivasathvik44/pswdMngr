@@ -165,21 +165,21 @@ async def test_api_rate_limiting_integration(async_client: AsyncClient):
     salt = base64.b64encode(b"0123456789abcdef").decode("ascii")
     await async_client.post(
         "/api/v1/auth/register",
-        json={"username": username, "auth_secret": "correct_secret_123456", "kdf_salt": salt},
+        json={"username": username, "account_password": "correct_account_pwd_123", "kdf_salt": salt},
     )
 
     # Perform 10 failed login attempts
     for _ in range(10):
         res = await async_client.post(
             "/api/v1/auth/login",
-            json={"username": username, "auth_secret": "wrong_secret_123456"},
+            json={"username": username, "account_password": "wrong_account_pwd_123"},
         )
         assert res.status_code == 401
 
     # 11th attempt must trigger HTTP 429
     throttled_res = await async_client.post(
         "/api/v1/auth/login",
-        json={"username": username, "auth_secret": "wrong_secret_123456"},
+        json={"username": username, "account_password": "wrong_account_pwd_123"},
     )
     assert throttled_res.status_code == 429
     assert "Too many failed login attempts" in throttled_res.json()["detail"]
@@ -199,15 +199,15 @@ async def test_sync_pagination_during_concurrent_mutations(async_client: AsyncCl
     vek = VaultKey.generate()
     username = f"sync_test_user_{uuid.uuid4().hex[:6]}"
     salt = base64.b64encode(b"0123456789abcdef").decode("ascii")
-    auth_secret = "sync_auth_secret_token_123"
+    account_password = "sync_account_password_123"
 
     await async_client.post(
         "/api/v1/auth/register",
-        json={"username": username, "auth_secret": auth_secret, "kdf_salt": salt},
+        json={"username": username, "account_password": account_password, "kdf_salt": salt},
     )
     login_res = await async_client.post(
         "/api/v1/auth/login",
-        json={"username": username, "auth_secret": auth_secret},
+        json={"username": username, "account_password": account_password},
     )
     headers = {"Authorization": f"Bearer {login_res.json()['session_token']}"}
 

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session as DbSession
 
 from vaultsync_server.api.dependencies import get_current_session
 from vaultsync_server.api.schemas import (
+    AccountPasswordChangeRequest,
     LoginRequest,
     LoginResponse,
     RegisterRequest,
@@ -17,13 +18,15 @@ from vaultsync_server.api.schemas import (
     VaultKeyUpdateRequest,
 )
 from vaultsync_server.config import settings
+from vaultsync_server.crypto.envelope import WrappedKeyEnvelope, b64decode
+from vaultsync_server.crypto.errors import CryptoError
 from vaultsync_server.db.base import get_db
 from vaultsync_server.db.models import Account, Session
 from vaultsync_server.services.auth import (
     generate_session_token,
-    hash_auth_secret,
+    hash_password,
     rate_limiter,
-    verify_auth_secret,
+    verify_password,
 )
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -40,10 +43,10 @@ async def register(
     request: Request,
     db: Annotated[DbSession, Depends(get_db)],
 ) -> RegisterResponse:
-    """Register a new account.
+    """Register a new account adhering to Two-Credential architecture.
     
-    The server stores the client-derived auth_secret (hashed via Argon2id)
-    and the client's KDF salt. The server never receives the master password or KEK.
+    The server stores the Argon2id hash of the account password and the public KDF salt.
+    The server never receives the master password, KEK, or unencrypted vault key.
     """
     client_ip = request.client.host if request.client else "unknown"
     rate_key = f"reg:{client_ip}"
@@ -52,6 +55,25 @@ async def register(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many registration attempts. Please try again later.",
         )
+
+    # Validate kdf_salt encoding and length
+    try:
+        b64decode(req.kdf_salt, expected_length=16)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid kdf_salt encoding or length: {exc}",
+        )
+
+    # Validate wrapped_vault_key envelope if provided
+    if req.wrapped_vault_key is not None:
+        try:
+            WrappedKeyEnvelope.from_json(req.wrapped_vault_key)
+        except (CryptoError, Exception) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid wrapped_vault_key envelope: {exc}",
+            )
 
     # Check for existing username
     stmt = select(Account).where(Account.username == req.username)
@@ -63,10 +85,10 @@ async def register(
             detail="Username already taken",
         )
 
-    auth_hash = hash_auth_secret(req.auth_secret)
+    account_password_hash = hash_password(req.account_password)
     account = Account(
         username=req.username,
-        auth_hash=auth_hash,
+        account_password_hash=account_password_hash,
         kdf_salt=req.kdf_salt,
         wrapped_vault_key=req.wrapped_vault_key,
     )
@@ -92,7 +114,7 @@ async def login(
     request: Request,
     db: Annotated[DbSession, Depends(get_db)],
 ) -> LoginResponse:
-    """Authenticate with client-derived auth_secret and issue a session bearer token."""
+    """Authenticate with independent server account password and issue a session bearer token."""
     client_ip = request.client.host if request.client else "unknown"
     ip_key = f"auth:ip:{client_ip}"
     user_key = f"auth:user:{req.username}"
@@ -114,7 +136,13 @@ async def login(
             detail="Invalid credentials",
         )
 
-    if not verify_auth_secret(account.auth_hash, req.auth_secret):
+    if account.requires_password_migration:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account requires password migration. Please perform password migration.",
+        )
+
+    if not verify_password(account.account_password_hash, req.account_password):
         rate_limiter.record_failure(ip_key)
         rate_limiter.record_failure(user_key)
         raise HTTPException(
@@ -169,6 +197,52 @@ async def logout(
     return {"status": "ok", "message": "Session successfully revoked"}
 
 
+@router.put(
+    "/password",
+    status_code=status.HTTP_200_OK,
+    summary="Change account password",
+)
+async def change_account_password(
+    req: AccountPasswordChangeRequest,
+    auth_data: Annotated[tuple[Account, Session], Depends(get_current_session)],
+    db: Annotated[DbSession, Depends(get_db)],
+) -> dict[str, str]:
+    """Change server account password.
+    
+    Verifies current account password and updates the stored Argon2id hash.
+    Leaves wrapped vault key, KDF salt, and encrypted records completely intact.
+    Invalidates all other active sessions for the account.
+    """
+    account, current_session = auth_data
+
+    if not verify_password(account.account_password_hash, req.current_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Current account password incorrect",
+        )
+
+    account.account_password_hash = hash_password(req.new_password)
+    account.requires_password_migration = False
+    account.updated_at = datetime.now(timezone.utc)
+
+    # Invalidate all other active sessions for this account
+    now = datetime.now(timezone.utc)
+    stmt = (
+        select(Session)
+        .where(
+            Session.account_id == account.id,
+            Session.id != current_session.id,
+            Session.revoked_at.is_(None),
+        )
+    )
+    other_sessions = db.execute(stmt).scalars().all()
+    for s in other_sessions:
+        s.revoked_at = now
+
+    db.commit()
+    return {"status": "ok", "message": "Account password updated successfully"}
+
+
 @router.get(
     "/salt",
     response_model=SaltResponse,
@@ -178,7 +252,7 @@ async def get_user_salt(
     username: str,
     db: Annotated[DbSession, Depends(get_db)],
 ) -> SaltResponse:
-    """Retrieve public KDF salt associated with a username so client can derive auth_secret."""
+    """Retrieve public KDF salt associated with a username."""
     stmt = select(Account).where(Account.username == username)
     account = db.execute(stmt).scalar_one_or_none()
     if not account:
@@ -199,8 +273,33 @@ async def update_vault_key(
     auth_data: Annotated[tuple[Account, Session], Depends(get_current_session)],
     db: Annotated[DbSession, Depends(get_db)],
 ) -> dict[str, str]:
-    """Store or update the user's WrappedKeyEnvelope (e.g. after master password change)."""
+    """Store or update the user's WrappedKeyEnvelope (e.g. after master password change).
+    
+    Validates envelope format and optional public KDF salt.
+    Encrypted records and account password hash remain untouched.
+    """
     account, _ = auth_data
+
+    # Validate wrapped vault key envelope format
+    try:
+        WrappedKeyEnvelope.from_json(req.wrapped_vault_key)
+    except (CryptoError, Exception) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid wrapped vault key envelope: {exc}",
+        )
+
+    # Optional KDF salt update (when changing master password)
+    if req.kdf_salt is not None:
+        try:
+            b64decode(req.kdf_salt, expected_length=16)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid kdf_salt: {exc}",
+            )
+        account.kdf_salt = req.kdf_salt
+
     account.wrapped_vault_key = req.wrapped_vault_key
     account.updated_at = datetime.now(timezone.utc)
     db.commit()

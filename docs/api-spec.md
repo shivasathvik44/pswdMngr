@@ -1,6 +1,6 @@
 # VaultSync Sync API Specification
 
-Version: `1.0.0` (Phase 3 Implementation)  
+Version: `1.2.0` (Phase 3.2 Two-Credential Implementation)  
 Base URL: `/api/v1`
 
 ---
@@ -9,16 +9,26 @@ Base URL: `/api/v1`
 
 VaultSync enforces strict cryptographic credential separation between client-side vault encryption and server authentication:
 
-1. **Vault Master Password**: Exists strictly on client devices and is **never** transmitted to the server.
-2. **Client KDF**: The client computes Argon2id over the Master Password and user salt to derive a master secret, then derives `auth_secret` using HKDF domain separation (`b"vaultsync:auth:v1"`).
-3. **Server Authentication**: The client transmits `auth_secret` over TLS to authenticate.
-4. **Server Storage**: The server hashes `auth_secret` using Argon2id with a server salt (`auth_hash`). The database stores only `auth_hash`.
-5. **Session Bearer Tokens**:
+1. **Vault Master Password ($P_{\text{vault}}$)**:
+   - Exists strictly on client devices and is **never** transmitted to the server under any circumstance.
+   - Derives the Key-Encryption Key ($\text{KEK}$) locally using Argon2id ($64\text{ MiB}, t=3, p=4$) and the public salt.
+   - Wraps the 256-bit Vault Encryption Key ($\text{VEK}$) via AES-256-GCM.
+2. **Account Password ($P_{\text{account}}$)**:
+   - Independent credential used exclusively for server account authentication.
+   - Transmitted over authenticated TLS (or loopback during local development).
+   - Never used as input to any vault encryption key derivation.
+3. **Server Password Storage**:
+   - The server verifies $P_{\text{account}}$ using Argon2id with server-side parameters ($32\text{ MiB}, t=2, p=2$).
+   - The database stores only `account_password_hash`. Zero verifiers derived from $P_{\text{vault}}$ are stored.
+4. **Session Bearer Tokens**:
    - Issued upon successful login (`POST /api/v1/auth/login`).
    - High-entropy CSPRNG tokens (`secrets.token_urlsafe(32)`).
-   - Only the SHA-256 verifier (`token_hash`) is stored in the database.
+   - Only the constant-length SHA-256 verifier (`token_hash`) is stored in the database.
    - Header: `Authorization: Bearer <token>`
-   - Default expiration: 7 days ($168$ hours), revoked immediately upon logout or remote device wipe.
+   - Default expiration: 7 days ($168$ hours), revoked immediately upon logout, password change, or remote device wipe.
+5. **Abuse Control & Rate Limiting**:
+   - Dual-axis sliding-window rate limiting on IP (`auth:ip:{ip}`) and username (`auth:user:{username}`).
+   - Multi-worker persistence via `auth_rate_limits` table in database.
 
 ---
 
@@ -28,11 +38,12 @@ VaultSync enforces strict cryptographic credential separation between client-sid
 | :--- | :--- | :--- | :--- |
 | `GET` | `/health` | Service health status | No |
 | `GET` | `/api/v1/health` | Versioned service health | No |
-| `POST` | `/api/v1/auth/register` | Register new account and upload KDF salt | No |
-| `POST` | `/api/v1/auth/login` | Authenticate with auth_secret and issue session | No |
+| `POST` | `/api/v1/auth/register` | Register new account with account password and public salt | No |
+| `POST` | `/api/v1/auth/login` | Authenticate with account password and issue session | No |
 | `POST` | `/api/v1/auth/logout` | Revoke current calling session | Yes |
-| `GET` | `/api/v1/auth/salt` | Fetch user KDF salt for client key derivation | No |
-| `PUT` | `/api/v1/auth/vault-key` | Upload/update wrapped vault key envelope | Yes |
+| `PUT` | `/api/v1/auth/password` | Change account password (invalidates other sessions) | Yes |
+| `GET` | `/api/v1/auth/salt` | Fetch user public KDF salt | No |
+| `PUT` | `/api/v1/auth/vault-key` | Upload/update wrapped vault key envelope and salt | Yes |
 | `GET` | `/api/v1/sessions` | List active sessions for account | Yes |
 | `DELETE`| `/api/v1/sessions/{id}` | Revoke specific device session | Yes |
 | `DELETE`| `/api/v1/sessions` | Revoke all sessions for account | Yes |
@@ -53,11 +64,15 @@ VaultSync enforces strict cryptographic credential separation between client-sid
   ```json
   {
     "username": "alice",
-    "auth_secret": "<base64_or_hex_derived_secret>",
-    "kdf_salt": "<base64_encoded_16_byte_salt>",
-    "wrapped_vault_key": "<optional_json_string_wrapped_key_envelope>"
+    "account_password": "SecureAccountPassword2026!",
+    "kdf_salt": "MDEyMzQ1Njc4OWFiY2RlZg==",
+    "wrapped_vault_key": "{\"version\":1,\"algorithm\":\"AES-256-GCM\",\"kdf\":{...},\"nonce\":\"...\",\"ciphertext\":\"...\"}"
   }
   ```
+- **Validation**:
+  - `account_password`: $\ge 8$ chars, $\le 256$ chars.
+  - `kdf_salt`: Valid base64 encoding of exactly 16 bytes.
+  - `wrapped_vault_key`: If provided, strictly validated against `WrappedKeyEnvelope` schema.
 - **Response 201 Created**:
   ```json
   {
@@ -68,15 +83,16 @@ VaultSync enforces strict cryptographic credential separation between client-sid
   }
   ```
 - **Error Responses**:
+  - `400 Bad Request`: Malformed `kdf_salt` or invalid `wrapped_vault_key` envelope.
   - `409 Conflict`: Username already registered.
-  - `429 Too Many Requests`: Rate limit exceeded.
+  - `429 Too Many Requests`: Registration rate limit exceeded.
 
 #### `POST /api/v1/auth/login`
 - **Request Body**:
   ```json
   {
     "username": "alice",
-    "auth_secret": "<derived_auth_secret>",
+    "account_password": "SecureAccountPassword2026!",
     "device_name": "Fedora Workstation",
     "device_id": "laptop-fedora-uuid"
   }
@@ -94,7 +110,56 @@ VaultSync enforces strict cryptographic credential separation between client-sid
   ```
 - **Error Responses**:
   - `401 Unauthorized`: Invalid credentials.
-  - `429 Too Many Requests`: Rate limit exceeded.
+  - `403 Forbidden`: Account requires legacy password migration.
+  - `429 Too Many Requests`: Failed attempt limit exceeded (dual-axis rate limiter).
+
+#### `PUT /api/v1/auth/password`
+- **Headers**: `Authorization: Bearer <session_token>`
+- **Request Body**:
+  ```json
+  {
+    "current_password": "OldAccountPassword2026!",
+    "new_password": "NewSecureAccountPassword2027!"
+  }
+  ```
+- **Semantics**:
+  - Verifies current account password against stored hash.
+  - Updates `account_password_hash` with Argon2id.
+  - Clears `requires_password_migration` flag.
+  - Revokes all other active sessions for the account.
+  - Leaves `wrapped_vault_key`, `kdf_salt`, and all encrypted records completely intact.
+- **Response 200 OK**:
+  ```json
+  {
+    "status": "ok",
+    "message": "Account password updated successfully"
+  }
+  ```
+- **Error Responses**:
+  - `401 Unauthorized`: Current account password incorrect or invalid session.
+
+#### `PUT /api/v1/auth/vault-key`
+- **Headers**: `Authorization: Bearer <session_token>`
+- **Request Body**:
+  ```json
+  {
+    "wrapped_vault_key": "{\"version\":1,\"algorithm\":\"AES-256-GCM\",\"kdf\":{...},\"nonce\":\"...\",\"ciphertext\":\"...\"}",
+    "kdf_salt": "MDEyMzQ1Njc4OWFiY2RlZg=="
+  }
+  ```
+- **Semantics**:
+  - Used during master password rotation.
+  - Validates `WrappedKeyEnvelope` structure and optional fresh public `kdf_salt`.
+  - Replaces stored envelope and salt.
+  - Encrypted records do not require re-encryption because the underlying VEK is preserved.
+  - Account password and `account_password_hash` are unchanged.
+- **Response 200 OK**:
+  ```json
+  {
+    "status": "ok",
+    "message": "Wrapped vault key updated successfully"
+  }
+  ```
 
 #### `GET /api/v1/auth/salt?username=alice`
 - **Response 200 OK**:
@@ -109,7 +174,7 @@ VaultSync enforces strict cryptographic credential separation between client-sid
 
 ---
 
-### 3.2 Session Management
+## 3.2 Session Management
 
 #### `GET /api/v1/sessions`
 - **Headers**: `Authorization: Bearer <session_token>`
@@ -134,7 +199,7 @@ VaultSync enforces strict cryptographic credential separation between client-sid
 
 ---
 
-### 3.3 Encrypted Records & Concurrency Control
+## 3.3 Encrypted Records & Concurrency Control
 
 #### `POST /api/v1/records`
 - **Request Body**:
@@ -199,7 +264,7 @@ VaultSync enforces strict cryptographic credential separation between client-sid
 
 ---
 
-### 3.4 Synchronization Cursor & Pagination
+## 3.4 Synchronization Cursor & Pagination
 
 #### `GET /api/v1/sync?since_cursor=0&limit=100`
 - **Query Parameters**:

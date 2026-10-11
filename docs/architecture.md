@@ -49,12 +49,13 @@ flowchart TD
 
 ## Core Architectural Pillars
 
-### 1. Zero-Knowledge Cryptographic Model
-The backend synchronization server operates strictly on a **zero-knowledge principle**:
-- **Master Password**: Never transmitted across the network under any circumstance.
+### 1. Zero-Knowledge Cryptographic Model & Two-Credential Architecture
+The backend synchronization server operates strictly on a **zero-knowledge principle** with complete credential separation:
+- **Account Password ($P_{\text{account}}$)**: Sent over TLS to authenticate against the server API; verified against a server-side Argon2id hash (`account_password_hash`). Never used in vault key derivation.
+- **Vault Master Password ($P_{\text{vault}}$)**: Exists strictly on client devices and is **never** transmitted across the network under any circumstance.
 - **Vault Encryption Key (VEK)**: A 256-bit symmetric key generated randomly on client initialization. The VEK encrypts all vault items.
-- **Key-Encryption Key (KEK)**: Derived locally from the master password using Argon2id with a unique per-user salt. The KEK wraps (encrypts) the VEK using authenticated encryption (AES-256-GCM).
-- **Server Storage**: The server stores only the user's salt, the wrapped VEK ciphertext, and encrypted record payloads.
+- **Key-Encryption Key (KEK)**: Derived locally from the master password using Argon2id ($64\text{ MiB}, t=3, p=4$) with a unique per-user salt. The KEK wraps (encrypts) the VEK using authenticated encryption (AES-256-GCM).
+- **Server Storage**: The server stores only the user's public salt, the wrapped VEK ciphertext (`WrappedKeyEnvelope`), and opaque encrypted record payloads.
 
 ### 2. Private Network Mesh Transport
 Rather than exposing the sync API to the public internet or relying on commercial third-party cloud hosting:
@@ -75,7 +76,7 @@ Clients maintain an active local replica of encrypted items:
 
 ---
 
-## Backend Persistence and Database Architecture (Phase 3)
+## Backend Persistence and Database Architecture (Phase 3.2)
 
 The backend persistence layer is built with **SQLAlchemy 2.0** and versioned using **Alembic** migrations. It supports SQLite for local development and can be pointed to PostgreSQL in multi-user deployments.
 
@@ -87,11 +88,12 @@ erDiagram
     ACCOUNTS {
         UUID id PK
         string username UK
-        string auth_hash
+        string account_password_hash
         string kdf_salt
         text wrapped_vault_key
         bigint sync_cursor
         boolean is_active
+        boolean requires_password_migration
         datetime created_at
         datetime updated_at
     }
@@ -119,11 +121,18 @@ erDiagram
         datetime created_at
         datetime updated_at
     }
+
+    AUTH_RATE_LIMITS {
+        int id PK
+        string identifier
+        float attempt_time
+    }
 ```
 
 ### 1. Account Entity (`accounts`)
-- Stores account identity, the server-side Argon2id hash of `auth_secret`, the public KDF salt, and the wrapped vault key envelope.
+- Stores account identity, the server-side Argon2id hash of `account_password`, the public KDF salt, and the wrapped vault key envelope.
 - Manages an account-level monotonic `sync_cursor` incremented on every record mutation.
+- Tracks `requires_password_migration` flag for legacy accounts.
 
 ### 2. Session Entity (`sessions`)
 - Represents an active device session.

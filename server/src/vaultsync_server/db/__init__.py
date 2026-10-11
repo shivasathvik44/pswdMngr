@@ -1,7 +1,7 @@
 """Database package for VaultSync Server."""
 
 from vaultsync_server.db.base import Base, SessionLocal, create_db_engine, engine, get_db
-from vaultsync_server.db.models import Account, EncryptedRecord, Session
+from vaultsync_server.db.models import Account, AuthRateLimit, EncryptedRecord, Session
 
 __all__ = [
     "Base",
@@ -12,4 +12,5 @@ __all__ = [
     "Account",
     "Session",
     "EncryptedRecord",
+    "AuthRateLimit",
 ]

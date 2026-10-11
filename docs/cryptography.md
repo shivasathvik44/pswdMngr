@@ -31,37 +31,46 @@ Status: **Active Protocol Specification**
 
 ---
 
-## 3. Key Hierarchy and Domain Separation
+## 3. Two-Credential Security Architecture
 
-To avoid key reuse across different security domains, VaultSync uses a two-tiered derivation hierarchy:
+To eliminate offline dictionary attacks against the vault master password in the event of a server database compromise, VaultSync enforces complete cryptographic credential separation between server account authentication and client-side vault encryption:
 
 ```
-                          Master Password (User)
-                                    │
-                                    ▼
-                Argon2id (Salt, m=65536, t=3, p=4, len=32)
-                                    │
-                                    ▼
-                           Master KDF Secret (32 bytes)
-                                    │
-         ┌──────────────────────────┴──────────────────────────┐
-         │ (HKDF-Expand, info="vaultsync:kek:v1")               │ (HKDF-Expand, info="vaultsync:auth:v1")
-         ▼                                                     ▼
-Key Encryption Key (KEK, 32B)                        Server Auth Secret (32B)
+[CREDENTIAL 1: SERVER AUTHENTICATION]
+Client Account Password (P_account)
+         │  (Sent over authenticated TLS)
+         ▼
+FastAPI Backend Server
+         │
+         ▼
+Argon2id Hash (account_password_hash stored in Database)
+(Never derived from or related to the Vault Master Password)
+
+
+[CREDENTIAL 2: CLIENT-SIDE VAULT ENCRYPTION]
+Client Vault Master Password (P_vault)
+         │  (NEVER sent to the server under any circumstance)
+         ▼
+Argon2id (Public Salt, m=65536, t=3, p=4, len=32)
+         │
+         ▼
+Key Encryption Key (KEK, 32B via HKDF-Expand info="vaultsync:kek:v1")
          │
          ▼ [AES-256-GCM Encrypt with AAD]
-Wrapped Vault Encryption Key (WVEK Envelope)
+Wrapped Vault Encryption Key (WVEK Envelope stored on server)
          ▲
          │
-Vault Encryption Key (VEK, 32B CSPRNG)
+Vault Encryption Key (VEK, 32B CSPRNG, client memory only)
          │
          ▼ [AES-256-GCM Encrypt with Record AAD]
-Encrypted Record Envelopes (Ciphertext + 16B Tag)
+Encrypted Record Envelopes (Ciphertext + 16B Tag stored on server)
 ```
 
-### Domain Separation Labels:
-- `b"vaultsync:kek:v1"`: Derives the Key-Encryption Key (KEK) used strictly on the client to wrap/unwrap the Vault Encryption Key.
-- `b"vaultsync:auth:v1"`: Derives the authentication credential sent (or hashed) for server session authentication. Knowledge of the server authentication secret does not compromise the KEK or the vault ciphertexts.
+### Security Properties of Credential Separation:
+1. **Zero Server Knowledge of Master Password**: The server never receives $P_{\text{vault}}$, the KEK, or the unencrypted VEK.
+2. **Zero Verifiers Stored for Master Password**: The server database stores no hash or verifier computed from $P_{\text{vault}}$.
+3. **Database Compromise Resilience**: An attacker possessing a complete database dump (`account_password_hash`, `kdf_salt`, `wrapped_vault_key`, `encrypted_records`) cannot verify candidate master passwords against any server authentication table. Even if the attacker spends extensive computation to crack $P_{\text{account}}$, this reveals zero information about $P_{\text{vault}}$ and cannot unwrap the vault encryption key.
+4. **Historical Note (Phase 3.1 Review)**: In the legacy Phase 3 prototype, `auth_secret` was derived from $P_{\text{vault}}$ using HKDF (`auth_secret = HKDF-Expand(Argon2id(P_vault, salt), "vaultsync:auth:v1")`) and stored as `auth_hash = Argon2id(auth_secret)`. As proved in Phase 3.1, this provided an attacker with an offline verification oracle. That approach was formally deprecated and replaced by the Two-Credential architecture in Phase 3.2.
 
 ---
 
@@ -73,18 +82,21 @@ Encrypted Record Envelopes (Ciphertext + 16B Tag)
      `b"vaultsync:key-wrap:v1:" + str(version).encode("utf-8") + b":" + kdf_algorithm.encode("utf-8")`
    - Nonce: Unique 12 bytes.
 3. **Unwrapping**:
-   - Master password is entered by the user.
+   - Vault master password is entered by the user on the client device.
    - KEK is derived via Argon2id + HKDF-SHA256 using the envelope's salt and parameters.
    - AES-256-GCM verifies the 16-byte authentication tag against the wrapped key ciphertext and the deterministic AAD.
-   - If verification succeeds, the 32-byte VEK is loaded into client memory. If verification fails, a generic `DecryptionFailedError` is raised.
-4. **Master Password Change**:
-   - Does not require re-encrypting all vault items!
-   - A new salt is generated. A new KEK is derived from the new master password.
-   - The existing VEK is re-wrapped with the new KEK, and the new wrapped key envelope is committed.
+   - If verification succeeds, the 32-byte VEK is loaded into volatile client memory. If verification fails, a generic `DecryptionFailedError` is raised.
+4. **Vault Master Password Rotation (`PUT /api/v1/auth/vault-key`)**:
+   - Handled entirely on the client without modifying encrypted vault records.
+   - A fresh public salt is generated. A new KEK is derived from the new master password.
+   - The existing VEK is re-wrapped with the new KEK, creating a new `WrappedKeyEnvelope`.
+   - The client uploads the new `WrappedKeyEnvelope` and fresh `kdf_salt` to `PUT /api/v1/auth/vault-key`.
+   - Existing encrypted records remain completely decryptable with the new master password because the underlying 256-bit VEK is preserved.
+   - The account password and server `account_password_hash` are unaffected.
 5. **Vault Key Rotation**:
-   - A new VEK is generated.
+   - A new VEK is generated on the client.
    - All existing vault items are decrypted with the old VEK and re-encrypted with the new VEK.
-   - The new VEK is wrapped with the current KEK and committed.
+   - The new VEK is wrapped with the current KEK and committed to the server.
 
 ---
 

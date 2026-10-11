@@ -27,8 +27,10 @@ This document identifies security boundaries, adversaries, potential threats, de
 - **Mitigation**:
   - The server stores **zero plaintext vault data**.
   - Vault records are stored as AEAD ciphertext blobs encrypted with the client's VEK.
-  - The VEK is stored wrapped (encrypted) with a KEK derived via Argon2id from the user's master password.
-  - Server authentication credentials (e.g. hashed passwords or tokens) use a separate derivation pathway (`Argon2id(master_password, auth_salt)`) from encryption keys (`Argon2id(master_password, enc_salt)`). Compromising the server hash does not reveal the encryption key.
+  - The VEK is stored wrapped (encrypted) with a KEK derived via Argon2id from the user's master password on the client.
+  - Server authentication uses an independent **Account Password** ($P_{\text{account}}$) verified against a server-side Argon2id hash (`account_password_hash`).
+  - **Zero Master Password Verifiers**: The server database contains zero hashes or verifiers derived from the Vault Master Password ($P_{\text{vault}}$). An attacker with a database dump cannot verify offline candidate master passwords against any server authentication table.
+  - Even if an attacker recovers $P_{\text{account}}$, they cannot unwrap the vault key or decrypt vault records.
 - **Limitations**: The attacker can observe sync metadata: number of records, ciphertext sizes, record UUIDs, revision numbers, and sync timestamps.
 
 ### 2.2 Network Interception
