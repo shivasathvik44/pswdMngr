@@ -37,7 +37,7 @@ async def sync_changes(
             EncryptedRecord.account_id == account.id,
             EncryptedRecord.sync_cursor > since_cursor,
         )
-        .order_by(EncryptedRecord.sync_cursor.asc())
+        .order_by(EncryptedRecord.sync_cursor.asc(), EncryptedRecord.id.asc())
         .limit(limit + 1)
     )
     records = db.execute(stmt).scalars().all()

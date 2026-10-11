@@ -94,9 +94,10 @@ async def login(
 ) -> LoginResponse:
     """Authenticate with client-derived auth_secret and issue a session bearer token."""
     client_ip = request.client.host if request.client else "unknown"
-    rate_key = f"auth:{req.username}:{client_ip}"
+    ip_key = f"auth:ip:{client_ip}"
+    user_key = f"auth:user:{req.username}"
 
-    if rate_limiter.is_rate_limited(rate_key):
+    if rate_limiter.is_rate_limited(ip_key) or rate_limiter.is_rate_limited(user_key):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many failed login attempts. Please wait before trying again.",
@@ -106,21 +107,24 @@ async def login(
     account = db.execute(stmt).scalar_one_or_none()
 
     if not account or not account.is_active:
-        rate_limiter.record_failure(rate_key)
+        rate_limiter.record_failure(ip_key)
+        rate_limiter.record_failure(user_key)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
         )
 
     if not verify_auth_secret(account.auth_hash, req.auth_secret):
-        rate_limiter.record_failure(rate_key)
+        rate_limiter.record_failure(ip_key)
+        rate_limiter.record_failure(user_key)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
         )
 
     # Reset rate limiting on successful login
-    rate_limiter.reset(rate_key)
+    rate_limiter.reset(user_key)
+    rate_limiter.reset(ip_key)
 
     raw_token, token_hash = generate_session_token()
     now = datetime.now(timezone.utc)

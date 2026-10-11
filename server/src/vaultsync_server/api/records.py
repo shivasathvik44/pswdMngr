@@ -61,8 +61,12 @@ async def create_record(
     )
     existing = db.execute(stmt).scalar_one_or_none()
 
+    # Serialize cursor allocation per account to prevent concurrency races
+    locked_account = db.execute(
+        select(Account).where(Account.id == account.id).with_for_update()
+    ).scalar_one()
+    locked_account.sync_cursor += 1
     now = datetime.now(timezone.utc)
-    account.sync_cursor += 1
 
     if existing:
         if not existing.is_deleted:
@@ -192,12 +196,16 @@ async def update_record(
             ),
         )
 
+    # Serialize cursor allocation per account to prevent concurrency races
+    locked_account = db.execute(
+        select(Account).where(Account.id == account.id).with_for_update()
+    ).scalar_one()
+    locked_account.sync_cursor += 1
     now = datetime.now(timezone.utc)
-    account.sync_cursor += 1
 
     record.ciphertext_payload = req.ciphertext_payload
     record.revision += 1
-    record.sync_cursor = account.sync_cursor
+    record.sync_cursor = locked_account.sync_cursor
     record.updated_at = now
 
     db.commit()
@@ -249,12 +257,16 @@ async def delete_record(
             ),
         )
 
+    # Serialize cursor allocation per account to prevent concurrency races
+    locked_account = db.execute(
+        select(Account).where(Account.id == account.id).with_for_update()
+    ).scalar_one()
+    locked_account.sync_cursor += 1
     now = datetime.now(timezone.utc)
-    account.sync_cursor += 1
 
     record.is_deleted = True
     record.revision += 1
-    record.sync_cursor = account.sync_cursor
+    record.sync_cursor = locked_account.sync_cursor
     record.ciphertext_payload = ""  # Purge ciphertext content
     record.updated_at = now
 

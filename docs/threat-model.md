@@ -120,3 +120,21 @@ This document identifies security boundaries, adversaries, potential threats, de
 ### 3.4 Rate Limiting on Authentication Endpoints
 - **Threat**: Automated brute-force credential guessing against `/api/v1/auth/login`.
 - **Mitigation**: Sliding-window rate limiter tracks failed attempts per IP and username, triggering `429 Too Many Requests` when thresholds are exceeded.
+
+---
+
+## 4. Phase 3.1 Security Review Findings
+
+### 4.1 Stolen Database Enables Offline Master Password Guessing
+- **Vulnerability**: In a single-password derivation scheme where `auth_secret = HKDF(Argon2id(P, salt), "auth")` and `auth_hash = Argon2id(auth_secret)` are stored on the server:
+  An attacker with a stolen database dump has `salt` and `auth_hash`. The attacker can test candidate passwords $P'$ by evaluating the derivation forward and checking `verify_auth_secret(auth_hash, auth_secret')`.
+  Even though HKDF is one-way, `auth_hash` serves as an offline verification oracle!
+  Once cracked, the attacker immediately computes $\text{KEK} = \text{HKDF}(M, \text{"kek"})$ and unwraps the vault encryption key, compromising all records.
+- **Safer Architecture (Recommended)**:
+  - Separate Account Password ($P_{\text{account}}$) from Vault Master Password ($P_{\text{vault}}$) + random 128-bit client Secret Key.
+  - The server only validates $P_{\text{account}}$. Stolen database dumps reveal zero information about $P_{\text{vault}}$.
+- **PAKE Alternative**: OPAQUE (RFC 9807) was evaluated; while theoretically preventing offline attacks for single passwords, the current absence of mature, audited cross-language libraries in Python and Kotlin makes it inappropriate for this phase.
+
+### 4.2 Multi-Worker and Multi-IP Abuse Limits
+- **Vulnerability**: Pure in-memory rate limiting without process sharing allows rotating IPs to bypass single-user limits, and multiple Uvicorn workers to dilute enforcement.
+- **Mitigation**: Dual-axis rate limiting (IP and username tracked separately). For production deployment, a database-backed rate limit table (`auth_rate_limits`) or shared persistent cache provides cluster-wide abuse prevention.
