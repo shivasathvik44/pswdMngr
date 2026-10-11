@@ -23,6 +23,7 @@ from vaultsync_server.crypto.errors import CryptoError
 from vaultsync_server.db.base import get_db
 from vaultsync_server.db.models import Account, Session
 from vaultsync_server.services.auth import (
+    db_rate_limiter,
     generate_session_token,
     hash_password,
     rate_limiter,
@@ -50,7 +51,7 @@ async def register(
     """
     client_ip = request.client.host if request.client else "unknown"
     rate_key = f"reg:{client_ip}"
-    if rate_limiter.is_rate_limited(rate_key):
+    if db_rate_limiter.is_rate_limited(db, rate_key) or rate_limiter.is_rate_limited(rate_key):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many registration attempts. Please try again later.",
@@ -79,6 +80,7 @@ async def register(
     stmt = select(Account).where(Account.username == req.username)
     existing = db.execute(stmt).scalar_one_or_none()
     if existing:
+        db_rate_limiter.record_failure(db, rate_key)
         rate_limiter.record_failure(rate_key)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -119,7 +121,12 @@ async def login(
     ip_key = f"auth:ip:{client_ip}"
     user_key = f"auth:user:{req.username}"
 
-    if rate_limiter.is_rate_limited(ip_key) or rate_limiter.is_rate_limited(user_key):
+    if (
+        db_rate_limiter.is_rate_limited(db, ip_key)
+        or db_rate_limiter.is_rate_limited(db, user_key)
+        or rate_limiter.is_rate_limited(ip_key)
+        or rate_limiter.is_rate_limited(user_key)
+    ):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many failed login attempts. Please wait before trying again.",
@@ -129,6 +136,8 @@ async def login(
     account = db.execute(stmt).scalar_one_or_none()
 
     if not account or not account.is_active:
+        db_rate_limiter.record_failure(db, ip_key)
+        db_rate_limiter.record_failure(db, user_key)
         rate_limiter.record_failure(ip_key)
         rate_limiter.record_failure(user_key)
         raise HTTPException(
@@ -143,6 +152,8 @@ async def login(
         )
 
     if not verify_password(account.account_password_hash, req.account_password):
+        db_rate_limiter.record_failure(db, ip_key)
+        db_rate_limiter.record_failure(db, user_key)
         rate_limiter.record_failure(ip_key)
         rate_limiter.record_failure(user_key)
         raise HTTPException(
@@ -151,6 +162,8 @@ async def login(
         )
 
     # Reset rate limiting on successful login
+    db_rate_limiter.reset(db, user_key)
+    db_rate_limiter.reset(db, ip_key)
     rate_limiter.reset(user_key)
     rate_limiter.reset(ip_key)
 

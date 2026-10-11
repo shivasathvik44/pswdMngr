@@ -28,9 +28,13 @@ Because VaultSync operates on a strict zero-knowledge architecture, reliable and
 ### Scenario B: Forgotten Server Account Password
 - **Prerequisite**: User has administrative access to the server host.
 - **Semantics**:
-  - The server account password can be administratively reset using the recovery CLI:
+  - The server account password can be administratively reset using the recovery CLI. To prevent password leakage into the Linux process table (`ps aux`, `/proc/<pid>/cmdline`) or shell history (CWE-214), passwords are never accepted as command-line arguments:
     ```bash
-    python -m vaultsync_server.scripts.admin_reset --username alice --password "NewSecureAccountPassword2026!"
+    # Interactive mode with masked double confirmation (recommended):
+    python -m vaultsync_server.scripts.admin_reset --username alice
+
+    # Non-interactive / piped stdin mode (for scripts and CI):
+    echo -n "NewSecureAccountPassword2026!" | python -m vaultsync_server.scripts.admin_reset --username alice --password-stdin
     ```
   - **Security Guarantee**:
     - Updates only `account_password_hash` with Argon2id.
@@ -70,7 +74,11 @@ Phase 3.2 migrated the schema to the **Two-Credential Model** via Alembic revisi
 For local development and self-hosted instances, execute the administrative reset script to establish an independent account password:
 
 ```bash
-python -m vaultsync_server.scripts.admin_reset --username <username> --password "<new_account_password>"
+# Interactive mode (prompts for new password with confirmation):
+python -m vaultsync_server.scripts.admin_reset --username <username>
+
+# Automation / piped mode:
+echo -n "<new_account_password>" | python -m vaultsync_server.scripts.admin_reset --username <username> --password-stdin
 ```
 
 This clears the `requires_password_migration` flag and sets the new `account_password_hash`. The user can then immediately log in with `<new_account_password>` and unlock their vault using their unchanged Vault Master Password.

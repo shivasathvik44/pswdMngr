@@ -78,7 +78,7 @@ async def create_record(
         existing.ciphertext_payload = req.ciphertext_payload
         existing.is_deleted = False
         existing.revision += 1
-        existing.sync_cursor = account.sync_cursor
+        existing.sync_cursor = locked_account.sync_cursor
         existing.updated_at = now
         record = existing
     else:
@@ -87,7 +87,7 @@ async def create_record(
             account_id=account.id,
             ciphertext_payload=req.ciphertext_payload,
             revision=1,
-            sync_cursor=account.sync_cursor,
+            sync_cursor=locked_account.sync_cursor,
             is_deleted=False,
             created_at=now,
             updated_at=now,

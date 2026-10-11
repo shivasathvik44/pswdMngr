@@ -14,14 +14,22 @@ Validates the Two-Credential security architecture:
 """
 
 import base64
+import io
 import json
+import sys
 import time
 import uuid
+from pathlib import Path
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
-from sqlalchemy.orm import Session as DbSession
+from sqlalchemy import select, text
+from sqlalchemy.orm import Session as DbSession, sessionmaker
+from alembic import command
+from alembic.config import Config
+
+from vaultsync_server.db.base import create_db_engine
+import vaultsync_server.scripts.admin_reset as admin_reset
 
 from vaultsync_server.crypto.envelope import (
     CURRENT_PROTOCOL_VERSION,
@@ -427,55 +435,81 @@ async def test_vault_master_password_change_lifecycle(
 # Test 6: Stolen DB dump provides no verifier for vault master password
 # ============================================================================
 
-def test_database_dump_prevents_offline_master_password_verification():
-    """Mathematically and programmatically demonstrate that a stolen database
+def test_offline_master_password_attack_reality_and_credential_separation():
+    """Rigorously verify the real behavior of an offline attacker with a stolen database dump.
 
-    dump provides zero verifiers to check offline guesses against the vault master password.
+    Attacker obtains: (username, account_password_hash, kdf_salt, wrapped_vault_key, records).
 
-    Attacker has: (username, account_password_hash, kdf_salt, wrapped_vault_key).
-    Because account_password is uncorrelated with master_password:
-    1. Attacker's candidate master passwords tested against account_password_hash never match.
-    2. Even cracking account_password_hash only reveals account_password, which cannot unwrap the vault key.
+    VERIFIED PROPERTIES:
+    1. Account Credential Separation:
+       - The server account password hash (account_password_hash) is completely independent.
+       - Attacker cannot verify candidate vault master passwords against account_password_hash.
+       - Even if account_password is recovered, it CANNOT unwrap the vault key.
+
+    2. Real Attack on Wrapped Vault Key:
+       - The wrapped_vault_key contains an AES-256-GCM ciphertext and a 16-byte authentication tag.
+       - The AES-GCM authentication tag INHERENTLY ACTS AS AN OFFLINE VERIFICATION ORACLE!
+       - For wrong candidate passwords, unwrap_vault_key fails with DecryptionFailedError (InvalidTag).
+       - For the correct candidate password, unwrap_vault_key succeeds, recovers the VEK,
+         and decrypts all confidential vault records.
+
+    3. Real Protection Boundary:
+       - The two-credential architecture separates server access from vault encryption,
+         ensuring the server never has an online or offline master-password verifier.
+       - However, it DOES NOT eliminate offline dictionary attacks against wrapped_vault_key.
+       - The sole defense against offline guessing on wrapped_vault_key is the memory-hard
+         work factor of Argon2id (RFC 9106) combined with master password entropy.
     """
-    vault_master_password = "SuperSecretMasterPassword!2026"
+    real_vault_master_password = "KnownTestMasterPassword#2026"
     account_password = "CompletelyIndependentServerPassword$888"
 
     # Server stores Argon2id of account_password
     account_password_hash = hash_password(account_password)
 
-    # Client wraps VEK with vault_master_password
+    # Client derives KEK and wraps VEK
     salt_bytes = generate_salt()
     kdf_params = Argon2Params(memory_cost=16384, time_cost=1, parallelism=2, salt=salt_bytes)
-    kek = derive_kek(vault_master_password, kdf_params)
+    kek = derive_kek(real_vault_master_password, kdf_params)
     vek = VaultKey.generate()
     wrap_envelope = wrap_vault_key(vek, kek, kdf_params)
 
-    # Stolen dump
+    # Encrypt sample confidential record
+    sample_secret_payload = '{"bank_pin": "9876", "mnemonic": "alpha beta gamma delta"}'
+    rec_envelope = encrypt_record(vek, "rec-stolen-1", sample_secret_payload)
+
+    # Stolen database columns
     stolen_account_password_hash = account_password_hash
     stolen_wrapped_vault_key = wrap_envelope.to_json()
+    stolen_rec_json = rec_envelope.to_json()
 
-    # Attacker runs offline dictionary attack attempting to verify candidate master passwords
-    candidate_master_passwords = [
+    # --- PROPERTY 1: Account password hash does NOT verify master password ---
+    candidate_passwords = [
         "12345678",
         "password",
         "admin2026",
-        "SuperSecretMasterPassword!2026",  # The true master password
-        "letmein",
+        real_vault_master_password,
     ]
-
-    for cand in candidate_master_passwords:
-        # Attacker tries to verify candidate against account_password_hash
-        # Property: NEVER matches, even for the correct master password!
+    for cand in candidate_passwords:
         assert verify_password(stolen_account_password_hash, cand) is False
 
-    # Suppose attacker spends extensive GPU resources and cracks account_password_hash,
-    # recovering account_password = "CompletelyIndependentServerPassword$888".
-    cracked_server_password = account_password
-
-    # Can attacker unwrap the vault key using the recovered account_password?
+    # Cracked account_password cannot unwrap the vault key
     stolen_wrap_obj = WrappedKeyEnvelope.from_json(stolen_wrapped_vault_key)
     with pytest.raises(DecryptionFailedError):
-        unwrap_vault_key(stolen_wrap_obj, cracked_server_password)
+        unwrap_vault_key(stolen_wrap_obj, account_password)
+
+    # --- PROPERTY 2: wrapped_vault_key AES-GCM tag IS an offline verification oracle ---
+    wrong_candidate = "WrongGuessPassword!999"
+    with pytest.raises(DecryptionFailedError):
+        unwrap_vault_key(stolen_wrap_obj, wrong_candidate)
+
+    # Correct candidate verifies via AES-GCM tag and recovers the VEK!
+    recovered_vek = unwrap_vault_key(stolen_wrap_obj, real_vault_master_password)
+    assert recovered_vek.raw_bytes == vek.raw_bytes
+
+    # Attacker successfully decrypts the vault record offline
+    stolen_rec_obj = EncryptedRecordEnvelope.from_json(stolen_rec_json)
+    decrypted_data = decrypt_record(recovered_vek, stolen_rec_obj)
+    assert decrypted_data.decode("utf-8") == sample_secret_payload
 
 
 # ============================================================================
@@ -642,3 +676,342 @@ def test_database_rate_limiter_persistence_and_pruning(test_db_engine):
         # Successful auth resets attempts
         worker_a_limiter.reset(db, identifier)
         assert worker_b_limiter.is_rate_limited(db, identifier) is False
+
+
+# ============================================================================
+# Test 10: Admin reset CLI interactive & non-interactive behavior (CWE-214)
+# ============================================================================
+
+def test_admin_reset_cli_interactive_success(monkeypatch, test_db_engine):
+    """Test admin_reset CLI in interactive getpass mode on password match."""
+    username = f"admin_cli_user_{uuid.uuid4().hex[:6]}"
+    orig_pwd = "OldAccountPassword123!"
+    new_pwd = "NewInteractivePassword456!"
+
+    with DbSession(test_db_engine) as db:
+        acc = Account(
+            username=username,
+            account_password_hash=hash_password(orig_pwd),
+            kdf_salt=b64encode(generate_salt()),
+            wrapped_vault_key='{"version": 1, "test": "preserved"}',
+        )
+        db.add(acc)
+        db.commit()
+
+    # Monkeypatch SessionLocal to use test_db_engine
+    test_sessionmaker = sessionmaker(autocommit=False, autoflush=False, bind=test_db_engine)
+    monkeypatch.setattr(admin_reset, "SessionLocal", test_sessionmaker)
+
+    # Monkeypatch getpass.getpass to supply matching passwords
+    prompt_history = []
+    def mock_getpass(prompt=""):
+        prompt_history.append(prompt)
+        return new_pwd
+
+    monkeypatch.setattr("getpass.getpass", mock_getpass)
+
+    # Run CLI
+    admin_reset.main(["--username", username])
+
+    # Assert getpass was called twice (entry and confirmation)
+    assert len(prompt_history) == 2
+    assert "Enter new account password: " in prompt_history[0]
+    assert "Confirm new account password: " in prompt_history[1]
+
+    # Verify database state
+    with DbSession(test_db_engine) as db:
+        updated = db.execute(select(Account).where(Account.username == username)).scalar_one()
+        assert verify_password(updated.account_password_hash, new_pwd) is True
+        assert verify_password(updated.account_password_hash, orig_pwd) is False
+        assert updated.wrapped_vault_key == '{"version": 1, "test": "preserved"}'
+
+
+def test_admin_reset_cli_interactive_mismatch(monkeypatch, test_db_engine):
+    """Test admin_reset CLI aborts when interactive passwords do not match."""
+    username = f"admin_cli_user_{uuid.uuid4().hex[:6]}"
+    orig_pwd = "OldAccountPassword123!"
+
+    with DbSession(test_db_engine) as db:
+        acc = Account(
+            username=username,
+            account_password_hash=hash_password(orig_pwd),
+            kdf_salt=b64encode(generate_salt()),
+            wrapped_vault_key='{"version": 1, "test": "preserved"}',
+        )
+        db.add(acc)
+        db.commit()
+
+    test_sessionmaker = sessionmaker(autocommit=False, autoflush=False, bind=test_db_engine)
+    monkeypatch.setattr(admin_reset, "SessionLocal", test_sessionmaker)
+
+    answers = ["PasswordA123!", "PasswordB456!"]
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": answers.pop(0))
+
+    with pytest.raises(SystemExit) as exc_info:
+        admin_reset.main(["--username", username])
+    assert exc_info.value.code == 1
+
+    # Verify password was NOT changed
+    with DbSession(test_db_engine) as db:
+        unchanged = db.execute(select(Account).where(Account.username == username)).scalar_one()
+        assert verify_password(unchanged.account_password_hash, orig_pwd) is True
+
+
+def test_admin_reset_cli_password_stdin(monkeypatch, test_db_engine):
+    """Test admin_reset CLI in piped stdin mode (automation / CI)."""
+    username = f"admin_cli_user_{uuid.uuid4().hex[:6]}"
+    orig_pwd = "OldAccountPassword123!"
+    new_pwd = "NewPipedStdinPassword789!"
+
+    with DbSession(test_db_engine) as db:
+        acc = Account(
+            username=username,
+            account_password_hash=hash_password(orig_pwd),
+            kdf_salt=b64encode(generate_salt()),
+            wrapped_vault_key='{"version": 1, "test": "preserved"}',
+        )
+        db.add(acc)
+        db.commit()
+
+    test_sessionmaker = sessionmaker(autocommit=False, autoflush=False, bind=test_db_engine)
+    monkeypatch.setattr(admin_reset, "SessionLocal", test_sessionmaker)
+    monkeypatch.setattr("sys.stdin", io.StringIO(f"{new_pwd}\n"))
+
+    admin_reset.main(["--username", username, "--password-stdin"])
+
+    with DbSession(test_db_engine) as db:
+        updated = db.execute(select(Account).where(Account.username == username)).scalar_one()
+        assert verify_password(updated.account_password_hash, new_pwd) is True
+
+
+def test_admin_reset_cli_length_validation(monkeypatch, test_db_engine):
+    """Test admin_reset CLI enforces length limits (8 <= len <= 256)."""
+    username = f"admin_cli_user_{uuid.uuid4().hex[:6]}"
+    with DbSession(test_db_engine) as db:
+        acc = Account(
+            username=username,
+            account_password_hash=hash_password("ValidInitialPass1!"),
+            kdf_salt=b64encode(generate_salt()),
+        )
+        db.add(acc)
+        db.commit()
+
+    test_sessionmaker = sessionmaker(autocommit=False, autoflush=False, bind=test_db_engine)
+    monkeypatch.setattr(admin_reset, "SessionLocal", test_sessionmaker)
+
+    # Too short (< 8)
+    monkeypatch.setattr("sys.stdin", io.StringIO("short\n"))
+    with pytest.raises(SystemExit) as exc_short:
+        admin_reset.main(["--username", username, "--password-stdin"])
+    assert exc_short.value.code == 1
+
+    # Too long (> 256)
+    monkeypatch.setattr("sys.stdin", io.StringIO(("x" * 257) + "\n"))
+    with pytest.raises(SystemExit) as exc_long:
+        admin_reset.main(["--username", username, "--password-stdin"])
+    assert exc_long.value.code == 1
+
+
+# ============================================================================
+# Test 11: Alembic migration 0002 upgrade on populated Phase 3.1 database
+# ============================================================================
+
+def test_alembic_migration_0002_with_populated_phase3_database(tmp_path: Path):
+    """Test upgrading a database with existing Phase 3.1 schema and records to 0002.
+
+    Verifies:
+    1. Migration 0001 creates initial schema (with auth_hash).
+    2. Inserting accounts and records into Phase 3.1 schema.
+    3. Migration 0002 upgrades cleanly:
+       - auth_hash column is dropped.
+       - account_password_hash is set to 'MIGRATION_REQUIRED' for existing accounts.
+       - requires_password_migration is set to True.
+       - kdf_salt, wrapped_vault_key, and encrypted records remain intact.
+       - auth_rate_limits table is created.
+    4. Downgrade warning verification:
+       - Downgrading to 0001 restores auth_hash as NULL (cannot resurrect legacy hash).
+    """
+    test_db = tmp_path / "migration_populated_test.db"
+    test_db_url = f"sqlite:///{test_db}"
+    ini_path = Path(__file__).parents[1] / "alembic.ini"
+    alembic_cfg = Config(str(ini_path))
+    alembic_cfg.set_main_option("sqlalchemy.url", test_db_url)
+    alembic_cfg.set_main_option("script_location", str(Path(__file__).parents[1] / "alembic"))
+
+    # Step 1: Upgrade to 0001 (Phase 3.1 schema)
+    command.upgrade(alembic_cfg, "0001_initial_schema")
+
+    # Step 2: Populate Phase 3.1 database with an account and record
+    engine = create_db_engine(test_db_url)
+    acc_id = str(uuid.uuid4())
+    legacy_auth_hash = "legacy_argon2id_hash_of_auth_secret"
+    kdf_salt_val = b64encode(b"0" * 16)
+    wrapped_key_val = '{"version": 1, "algorithm": "AES-256-GCM", "preserved": true}'
+    rec_payload = '{"iv": "abc", "ciphertext": "secret_data"}'
+
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO accounts (id, username, auth_hash, kdf_salt, wrapped_vault_key, sync_cursor, is_active, created_at, updated_at) "
+                "VALUES (:id, :username, :auth_hash, :kdf_salt, :wrapped_vault_key, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {
+                "id": acc_id,
+                "username": "legacy_alice",
+                "auth_hash": legacy_auth_hash,
+                "kdf_salt": kdf_salt_val,
+                "wrapped_vault_key": wrapped_key_val,
+            },
+        )
+        conn.execute(
+            text(
+                "INSERT INTO encrypted_records (id, record_id, account_id, ciphertext_payload, revision, sync_cursor, is_deleted, created_at, updated_at) "
+                "VALUES (:id, :record_id, :account_id, :payload, 1, 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {
+                "id": str(uuid.uuid4()),
+                "record_id": "rec-legacy-1",
+                "account_id": acc_id,
+                "payload": rec_payload,
+            },
+        )
+        conn.commit()
+
+    # Step 3: Upgrade to 0002_two_credential_architecture
+    command.upgrade(alembic_cfg, "0002_two_credential_architecture")
+
+    # Verify schema and data migration
+    with engine.connect() as conn:
+        acc_row = conn.execute(
+            text("SELECT id, username, account_password_hash, requires_password_migration, kdf_salt, wrapped_vault_key FROM accounts WHERE id = :id"),
+            {"id": acc_id},
+        ).mappings().one()
+
+        assert acc_row["account_password_hash"] == "MIGRATION_REQUIRED"
+        assert acc_row["requires_password_migration"] in (True, 1)
+        assert acc_row["kdf_salt"] == kdf_salt_val
+        assert acc_row["wrapped_vault_key"] == wrapped_key_val
+
+        # Verify auth_hash column no longer exists
+        with pytest.raises(Exception):
+            conn.execute(text("SELECT auth_hash FROM accounts"))
+
+        # Verify encrypted_records table preserved
+        rec_row = conn.execute(
+            text("SELECT record_id, ciphertext_payload, sync_cursor FROM encrypted_records WHERE account_id = :id"),
+            {"id": acc_id},
+        ).mappings().one()
+        assert rec_row["record_id"] == "rec-legacy-1"
+        assert rec_row["ciphertext_payload"] == rec_payload
+
+        # Verify auth_rate_limits table exists and functions
+        conn.execute(
+            text("INSERT INTO auth_rate_limits (identifier, attempt_time) VALUES (:ident, :att_time)"),
+            {"ident": "test_ip_1", "att_time": time.time()},
+        )
+        rate_count = conn.execute(text("SELECT COUNT(*) FROM auth_rate_limits")).scalar()
+        assert rate_count == 1
+        conn.commit()
+
+    # Step 4: Verify downgrade behavior (destructive downgrade observation)
+    command.downgrade(alembic_cfg, "0001_initial_schema")
+    with engine.connect() as conn:
+        downgraded_row = conn.execute(
+            text("SELECT auth_hash, kdf_salt, wrapped_vault_key FROM accounts WHERE id = :id"),
+            {"id": acc_id},
+        ).mappings().one()
+        # auth_hash is restored as NULL (lossy downgrade)
+        assert downgraded_row["auth_hash"] is None
+        assert downgraded_row["wrapped_vault_key"] == wrapped_key_val
+
+
+# ============================================================================
+# Test 12: PUT /api/v1/auth/vault-key cross-account isolation and malformed preservation
+# ============================================================================
+
+@pytest.mark.anyio
+async def test_vault_key_update_cross_account_isolation_and_preservation(async_client: AsyncClient, test_db_engine):
+    """Test that PUT /api/v1/auth/vault-key enforces strict per-account isolation
+
+    and that malformed envelope submissions preserve previously stored keys intact.
+    """
+    params_a = Argon2Params(memory_cost=16384, time_cost=1, parallelism=2, salt=generate_salt())
+    salt_a = b64encode(params_a.salt)
+    kek_a = derive_kek("AliceMaster1!", params_a)
+    env_a_orig = wrap_vault_key(VaultKey.generate(), kek_a, params_a).to_json()
+
+    params_b = Argon2Params(memory_cost=16384, time_cost=1, parallelism=2, salt=generate_salt())
+    salt_b = b64encode(params_b.salt)
+    kek_b = derive_kek("BobMaster1!", params_b)
+    env_b_orig = wrap_vault_key(VaultKey.generate(), kek_b, params_b).to_json()
+
+    # 1. Register Alice and Bob
+    alice_username = f"alice_{uuid.uuid4().hex[:6]}"
+    bob_username = f"bob_{uuid.uuid4().hex[:6]}"
+
+    reg_a = await async_client.post("/api/v1/auth/register", json={
+        "username": alice_username,
+        "account_password": "AlicePassword123!",
+        "kdf_salt": salt_a,
+        "wrapped_vault_key": env_a_orig,
+    })
+    assert reg_a.status_code == 201
+
+    reg_b = await async_client.post("/api/v1/auth/register", json={
+        "username": bob_username,
+        "account_password": "BobPassword123!",
+        "kdf_salt": salt_b,
+        "wrapped_vault_key": env_b_orig,
+    })
+    assert reg_b.status_code == 201
+
+    # Login both
+    login_a = await async_client.post("/api/v1/auth/login", json={"username": alice_username, "account_password": "AlicePassword123!"})
+    alice_token = login_a.json()["session_token"]
+
+    login_b = await async_client.post("/api/v1/auth/login", json={"username": bob_username, "account_password": "BobPassword123!"})
+    bob_token = login_b.json()["session_token"]
+
+    # 2. Alice updates her vault key
+    params_a_new = Argon2Params(memory_cost=16384, time_cost=1, parallelism=2, salt=generate_salt())
+    salt_a_new = b64encode(params_a_new.salt)
+    kek_a_new = derive_kek("AliceMasterNew1!", params_a_new)
+    env_a_new = wrap_vault_key(VaultKey.generate(), kek_a_new, params_a_new).to_json()
+
+    put_a = await async_client.put(
+        "/api/v1/auth/vault-key",
+        headers={"Authorization": f"Bearer {alice_token}"},
+        json={"wrapped_vault_key": env_a_new, "kdf_salt": salt_a_new},
+    )
+    assert put_a.status_code == 200
+
+    # Verify Alice's key updated, but Bob's key was NOT touched (Cross-account isolation)
+    with DbSession(test_db_engine) as db:
+        acc_a = db.execute(select(Account).where(Account.username == alice_username)).scalar_one()
+        acc_b = db.execute(select(Account).where(Account.username == bob_username)).scalar_one()
+        assert acc_a.wrapped_vault_key == env_a_new
+        assert acc_a.kdf_salt == salt_a_new
+        assert acc_b.wrapped_vault_key == env_b_orig
+        assert acc_b.kdf_salt == salt_b
+
+    # 3. Malformed envelope submission preserves previously stored key
+    bad_env_payloads = [
+        {"wrapped_vault_key": "not-a-json-object"},
+        {"wrapped_vault_key": json.dumps({"version": 999, "algorithm": "AES-256-GCM"})},
+        {"wrapped_vault_key": env_a_new, "kdf_salt": "invalid-b64-salt!!!"},
+    ]
+
+    for bad_req in bad_env_payloads:
+        res_bad = await async_client.put(
+            "/api/v1/auth/vault-key",
+            headers={"Authorization": f"Bearer {alice_token}"},
+            json=bad_req,
+        )
+        assert res_bad.status_code == 400
+
+        # Verify Alice's DB record remains completely intact (not overwritten with partial/corrupted data)
+        with DbSession(test_db_engine) as db:
+            acc_a_check = db.execute(select(Account).where(Account.username == alice_username)).scalar_one()
+            assert acc_a_check.wrapped_vault_key == env_a_new
+            assert acc_a_check.kdf_salt == salt_a_new
+

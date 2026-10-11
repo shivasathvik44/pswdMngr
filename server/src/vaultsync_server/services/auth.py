@@ -146,6 +146,13 @@ class DatabaseRateLimiter:
         db.commit()
         return result.rowcount or 0
 
+    def reset_all(self, db: DbSession) -> int:
+        """Clear all rate limit attempt logs across all identifiers (for testing and administrative reset)."""
+        stmt = delete(AuthRateLimit)
+        result = db.execute(stmt)
+        db.commit()
+        return result.rowcount or 0
+
 
 rate_limiter = InMemoryRateLimiter(
     max_attempts=settings.rate_limit_max_attempts,

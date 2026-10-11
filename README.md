@@ -13,7 +13,7 @@
 ## Key Highlights
 
 - **Zero-Knowledge Security**: The server stores only ciphertext blobs, user salts, and wrapped cryptographic keys. Master passwords and vault contents are never exposed to the server or network.
-- **Two-Credential Architecture**: Complete mathematical separation between the server Account Password ($P_{\text{account}}$) and client Vault Master Password ($P_{\text{vault}}$). Stolen server database dumps contain zero master password verifiers.
+- **Two-Credential Architecture**: Complete mathematical separation between the server Account Password ($P_{\text{account}}$) and client Vault Master Password ($P_{\text{vault}}$). Server authentication tables contain zero master password verifiers, ensuring account compromise never reveals vault keys.
 - **Private Mesh Connectivity**: Designed specifically for private network overlays (Tailscale or WireGuard) with secure loopback/VPN bindings (`127.0.0.1`).
 - **Offline-First Synchronization**: Full offline read/write access with version cursors, optimistic concurrency conflict detection, and deletion tombstones.
 - **Session Protection**: Bearer tokens are stored in the database strictly as SHA-256 verifier hashes, preventing session hijacking from static database dumps.
@@ -101,7 +101,11 @@ alembic -c server/alembic.ini upgrade head
 To reset an account password or migrate a legacy account without touching vault contents:
 
 ```bash
-python -m vaultsync_server.scripts.admin_reset --username alice --password "NewSecurePassword2026!"
+# Interactive mode (prompts for new password with confirmation):
+python -m vaultsync_server.scripts.admin_reset --username alice
+
+# Automation / piped mode:
+echo -n "NewSecurePassword2026!" | python -m vaultsync_server.scripts.admin_reset --username alice --password-stdin
 ```
 
 ### Running the Automated Test Suite

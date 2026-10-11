@@ -24,8 +24,12 @@ We have migrated VaultSync to an explicit **Two-Credential Security Architecture
 ### 2. Vault Master Password ($P_{\text{vault}}$)
 - **Role**: Kept strictly client-side to derive the Key-Encryption Key ($\text{KEK}$) using RFC 9106 Argon2id ($64\text{ MiB}, t=3, p=4$) and a unique public salt.
 - **Zero-Knowledge Guarantee**: Never transmitted to the server under any condition (registration, login, password changes, or recovery).
-- **Zero Verifiers**: The server database stores zero authentication verifiers or hashes derived from $P_{\text{vault}}$.
-- **Stolen Database Security**: A stolen database dump provides the attacker with zero verifiers to test offline guesses against $P_{\text{vault}}$ in the authentication tables. Testing candidate master passwords against `account_password_hash` will never match because the values are mathematically uncorrelated.
+- **Zero Verifiers in Authentication System**: The server database stores zero authentication verifiers or hashes derived from $P_{\text{vault}}$.
+- **Stolen Database Security & Threat Boundaries**:
+  - Testing candidate master passwords against `account_password_hash` yields zero verification signals because the credentials are mathematically uncorrelated.
+  - However, an attacker with a full database dump possesses `wrapped_vault_key`, which contains an AES-256-GCM ciphertext and a 16-byte authentication tag. This AEAD tag **inherently acts as an offline verification oracle** for candidate master passwords tested via `unwrap_vault_key()`.
+  - Protection against offline guessing of $P_{\text{vault}}$ is provided by client-enforced passphrase entropy and the memory-hard work factor of Argon2id ($64\text{ MiB}, t=3, p=4$), NOT by the two-credential architecture.
+  - The two-credential architecture specifically protects against: (a) server operators or network eavesdroppers intercepting vault keys, (b) credential-stuffing at the server login endpoint revealing the master password, and (c) an account password breach enabling vault decryption.
 
 ### 3. Account Password Changes (`PUT /api/v1/auth/password`)
 - Requires active authenticated session and verification of the current account password.
@@ -41,7 +45,7 @@ We have migrated VaultSync to an explicit **Two-Credential Security Architecture
 - The account password and `account_password_hash` remain unchanged.
 
 ### 5. Account Recovery and Master Password Loss Semantics
-- **Account Password Lost**: Reset via administrative CLI (`python -m vaultsync_server.scripts.admin_reset`) or authenticated recovery flow. This updates `account_password_hash` only. It does not decrypt or alter the vault.
+- **Account Password Lost**: Reset via administrative CLI (`python -m vaultsync_server.scripts.admin_reset --username <user>` with interactive prompt or `--password-stdin`) or authenticated recovery flow. This updates `account_password_hash` only. It does not decrypt or alter the vault.
 - **Vault Master Password Lost**: Encrypted records are **permanently irrecoverable**. The server cannot restore vault access, and no false "master password reset" feature exists.
 
 ### 6. Database Migration (`0002_two_credential_architecture.py`)

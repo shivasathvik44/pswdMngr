@@ -158,7 +158,7 @@ def test_rate_limiter_dual_axis_and_reset():
 
 
 @pytest.mark.anyio
-async def test_api_rate_limiting_integration(async_client: AsyncClient):
+async def test_api_rate_limiting_integration(async_client: AsyncClient, test_db_engine):
     """Test HTTP 429 response when failed attempts exceed threshold."""
     # Register victim user
     username = f"ratelimit_victim_{uuid.uuid4().hex[:6]}"
@@ -184,9 +184,12 @@ async def test_api_rate_limiting_integration(async_client: AsyncClient):
     assert throttled_res.status_code == 429
     assert "Too many failed login attempts" in throttled_res.json()["detail"]
 
-    # Reset rate limiter so subsequent tests in the session are not affected
-    from vaultsync_server.services.auth import rate_limiter
+    # Reset both database and in-memory rate limiters so subsequent tests are unaffected
+    from sqlalchemy.orm import Session as DbSession
+    from vaultsync_server.services.auth import db_rate_limiter, rate_limiter
     rate_limiter._attempts.clear()
+    with DbSession(test_db_engine) as db:
+        db_rate_limiter.reset_all(db)
 
 
 # ============================================================================

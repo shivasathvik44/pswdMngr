@@ -4,6 +4,13 @@ Revision ID: 0002_two_credential_architecture
 Revises: 0001_initial_schema
 Create Date: 2026-10-11 23:40:00.000000
 
+WARNING ON DOWNGRADE:
+    Downgrading from this revision is lossy and destructive to account authentication credentials.
+    On downgrade, `account_password_hash` and `requires_password_migration` are dropped,
+    and legacy `auth_hash` is restored with NULL values. The migration cannot reconstitute
+    dropped Phase 3.1 single-credential auth_hash verifiers.
+    Accounts downgraded without restoring from a pre-migration backup will require an
+    administrative reset or re-registration.
 """
 from typing import Sequence, Union
 

@@ -29,9 +29,11 @@ This document identifies security boundaries, adversaries, potential threats, de
   - Vault records are stored as AEAD ciphertext blobs encrypted with the client's VEK.
   - The VEK is stored wrapped (encrypted) with a KEK derived via Argon2id from the user's master password on the client.
   - Server authentication uses an independent **Account Password** ($P_{\text{account}}$) verified against a server-side Argon2id hash (`account_password_hash`).
-  - **Zero Master Password Verifiers**: The server database contains zero hashes or verifiers derived from the Vault Master Password ($P_{\text{vault}}$). An attacker with a database dump cannot verify offline candidate master passwords against any server authentication table.
+  - **Zero Master Password Verifiers in Auth Tables**: The server authentication tables contain zero hashes or verifiers derived from $P_{\text{vault}}$. An attacker testing candidate master passwords against `account_password_hash` receives zero verification signals.
   - Even if an attacker recovers $P_{\text{account}}$, they cannot unwrap the vault key or decrypt vault records.
-- **Limitations**: The attacker can observe sync metadata: number of records, ciphertext sizes, record UUIDs, revision numbers, and sync timestamps.
+- **Limitations & Offline Attack Reality**:
+  - The attacker can observe sync metadata: number of records, ciphertext sizes, record UUIDs, revision numbers, and sync timestamps.
+  - **Offline Attack Oracle on Wrapped Vault Key**: The stolen database contains `kdf_salt` and `wrapped_vault_key`. Because `wrapped_vault_key` uses AES-256-GCM, its 16-byte authentication tag acts as an inherent offline verification oracle. An attacker can iterate candidate master passwords offline through Argon2id and test `unwrap_vault_key()`. Protection against this dictionary attack relies strictly on the memory-hard work factor of Argon2id ($64\text{ MiB}, t=3, p=4$) and master password passphrase entropy, NOT on the absence of a verification oracle.
 
 ### 2.2 Network Interception
 - **Threat**: Man-in-the-middle (MitM) adversary intercepts network traffic between Android phone and Fedora desktop.
@@ -132,9 +134,11 @@ This document identifies security boundaries, adversaries, potential threats, de
   An attacker with a stolen database dump has `salt` and `auth_hash`. The attacker can test candidate passwords $P'$ by evaluating the derivation forward and checking `verify_auth_secret(auth_hash, auth_secret')`.
   Even though HKDF is one-way, `auth_hash` serves as an offline verification oracle!
   Once cracked, the attacker immediately computes $\text{KEK} = \text{HKDF}(M, \text{"kek"})$ and unwraps the vault encryption key, compromising all records.
-- **Safer Architecture (Recommended)**:
-  - Separate Account Password ($P_{\text{account}}$) from Vault Master Password ($P_{\text{vault}}$) + random 128-bit client Secret Key.
-  - The server only validates $P_{\text{account}}$. Stolen database dumps reveal zero information about $P_{\text{vault}}$.
+- **Two-Credential Architecture (Implemented in Phase 3.2)**:
+  - Separate Account Password ($P_{\text{account}}$) from Vault Master Password ($P_{\text{vault}}$).
+  - The server only validates $P_{\text{account}}$ via `account_password_hash`. The server authentication system contains zero master password verifiers.
+  - An account password breach reveals zero information about $P_{\text{vault}}$.
+  - *Note on Threat Boundaries*: A stolen database dump still contains `wrapped_vault_key`, whose AES-256-GCM authentication tag serves as an offline oracle for $P_{\text{vault}}$ guesses. The two-credential architecture protects against server-side authentication stuffing and server operator compromise, while offline dictionary attack defense on the wrapped key relies strictly on Argon2id work factor ($64\text{ MiB}, t=3, p=4$) and master passphrase entropy.
 - **PAKE Alternative**: OPAQUE (RFC 9807) was evaluated; while theoretically preventing offline attacks for single passwords, the current absence of mature, audited cross-language libraries in Python and Kotlin makes it inappropriate for this phase.
 
 ### 4.2 Multi-Worker and Multi-IP Abuse Limits

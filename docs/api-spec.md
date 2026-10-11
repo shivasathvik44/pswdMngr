@@ -19,7 +19,8 @@ VaultSync enforces strict cryptographic credential separation between client-sid
    - Never used as input to any vault encryption key derivation.
 3. **Server Password Storage**:
    - The server verifies $P_{\text{account}}$ using Argon2id with server-side parameters ($32\text{ MiB}, t=2, p=2$).
-   - The database stores only `account_password_hash`. Zero verifiers derived from $P_{\text{vault}}$ are stored.
+   - The database stores only `account_password_hash` for server authentication. Zero verifiers derived from $P_{\text{vault}}$ are stored in authentication tables.
+   - Note: The encrypted `wrapped_vault_key` contains an AES-256-GCM authentication tag that acts as an inherent offline verification oracle if the database is dumped; master password protection from offline guessing relies strictly on client-side Argon2id ($64\text{ MiB}, t=3, p=4$) and passphrase entropy.
 4. **Session Bearer Tokens**:
    - Issued upon successful login (`POST /api/v1/auth/login`).
    - High-entropy CSPRNG tokens (`secrets.token_urlsafe(32)`).

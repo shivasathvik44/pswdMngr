@@ -68,9 +68,13 @@ Encrypted Record Envelopes (Ciphertext + 16B Tag stored on server)
 
 ### Security Properties of Credential Separation:
 1. **Zero Server Knowledge of Master Password**: The server never receives $P_{\text{vault}}$, the KEK, or the unencrypted VEK.
-2. **Zero Verifiers Stored for Master Password**: The server database stores no hash or verifier computed from $P_{\text{vault}}$.
-3. **Database Compromise Resilience**: An attacker possessing a complete database dump (`account_password_hash`, `kdf_salt`, `wrapped_vault_key`, `encrypted_records`) cannot verify candidate master passwords against any server authentication table. Even if the attacker spends extensive computation to crack $P_{\text{account}}$, this reveals zero information about $P_{\text{vault}}$ and cannot unwrap the vault encryption key.
-4. **Historical Note (Phase 3.1 Review)**: In the legacy Phase 3 prototype, `auth_secret` was derived from $P_{\text{vault}}$ using HKDF (`auth_secret = HKDF-Expand(Argon2id(P_vault, salt), "vaultsync:auth:v1")`) and stored as `auth_hash = Argon2id(auth_secret)`. As proved in Phase 3.1, this provided an attacker with an offline verification oracle. That approach was formally deprecated and replaced by the Two-Credential architecture in Phase 3.2.
+2. **Zero Verifiers in Authentication Tables**: The server database stores no hash or verifier computed from $P_{\text{vault}}$ in any authentication table. The server authenticates users solely via $P_{\text{account}}$ and `account_password_hash`.
+3. **Account Password Compromise Isolation**: An attacker who compromises the server, intercepts network traffic, or recovers $P_{\text{account}}$ gains zero information about $P_{\text{vault}}$ and cannot unwrap the vault encryption key.
+4. **Offline Master-Password Guessing Reality & Boundaries**:
+   - A stolen database dump containing `wrapped_vault_key` and `kdf_salt` **does permit offline master-password guessing**.
+   - Specifically, `wrapped_vault_key` contains an AES-256-GCM ciphertext and a 16-byte authentication tag. This authentication tag **inherently acts as an offline verification oracle**: candidate master passwords can be derived through Argon2id and tested against `unwrap_vault_key()`. Decryption fails with `InvalidTag` for incorrect guesses and succeeds for the true password.
+   - **Protection Boundary**: The Two-Credential architecture does *not* prevent offline guessing on `wrapped_vault_key` from a full database dump; rather, protection against offline dictionary attacks relies entirely on the memory-hard work factor of Argon2id ($64\text{ MiB}, t=3, p=4$ in production, RFC 9106) and client-enforced passphrase entropy.
+5. **Historical Note (Phase 3.1 Review)**: In the legacy Phase 3 prototype, `auth_secret` was derived from $P_{\text{vault}}$ using HKDF (`auth_secret = HKDF-Expand(Argon2id(P_vault, salt), "vaultsync:auth:v1")`) and stored as `auth_hash = Argon2id(auth_secret)`. As proved in Phase 3.1, this provided an attacker with an online/offline server authentication verification oracle directly tied to the master password. That approach was formally deprecated and replaced by the Two-Credential architecture in Phase 3.2.
 
 ---
 
