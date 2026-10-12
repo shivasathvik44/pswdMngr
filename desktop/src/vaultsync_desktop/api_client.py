@@ -55,9 +55,15 @@ class NotFoundError(ApiError):
 class ApiClient:
     """HTTP client interacting with the VaultSync REST API."""
 
-    def __init__(self, base_url: str = "http://127.0.0.1:8000", timeout: float = 10.0):
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:8000",
+        timeout: float = 10.0,
+        transport: Optional[httpx.AsyncBaseTransport] = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.transport = transport
         self.session_token: Optional[str] = None
         self._validate_base_url(self.base_url)
 
@@ -102,7 +108,7 @@ class ApiClient:
         """Perform an HTTP request and map responses to typed errors."""
         url = f"{self.base_url}{path}"
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(transport=self.transport, timeout=self.timeout) as client:
                 response = await client.request(
                     method=method,
                     url=url,
@@ -125,20 +131,21 @@ class ApiClient:
         except Exception:
             detail = response.text or detail
 
+        detail_str = str(detail)
         if response.status_code == 401:
-            raise AuthenticationError(detail, status_code=401)
+            raise AuthenticationError(detail_str, status_code=401)
         elif response.status_code == 403:
-            if "migration" in detail.lower():
-                raise MigrationRequiredError(detail, status_code=403)
-            raise ApiError(f"Forbidden: {detail}", status_code=403)
+            if "migration" in detail_str.lower():
+                raise MigrationRequiredError(detail_str, status_code=403)
+            raise ApiError(f"Forbidden: {detail_str}", status_code=403)
         elif response.status_code == 404:
-            raise NotFoundError(detail, status_code=404)
+            raise NotFoundError(detail_str, status_code=404)
         elif response.status_code == 409:
-            raise ConflictError(f"Conflict: {detail}")
+            raise ConflictError(f"Conflict: {detail_str}")
         elif response.status_code == 429:
-            raise RateLimitError(f"Rate limit exceeded: {detail}", status_code=429)
+            raise RateLimitError(f"Rate limit exceeded: {detail_str}", status_code=429)
         else:
-            raise ApiError(f"Server error ({response.status_code}): {detail}", status_code=response.status_code)
+            raise ApiError(f"Server error ({response.status_code}): {detail_str}", status_code=response.status_code)
 
     # ------------------------------------------------------------------------
     # Public Endpoints
@@ -226,6 +233,27 @@ class ApiClient:
         """Fetch incremental record updates since cursor."""
         params = {"since_cursor": since_cursor, "limit": limit}
         return await self._request("GET", "/api/v1/sync", params=params)
+
+    async def get_vault_key(self) -> dict[str, Any]:
+        """Retrieve current wrapped vault key envelope and KDF salt for calling session."""
+        return await self._request("GET", "/api/v1/auth/vault-key")
+
+    async def get_user_salt(self, username: str) -> dict[str, Any]:
+        """Fetch public KDF salt for a username."""
+        return await self._request("GET", "/api/v1/auth/salt", params={"username": username})
+
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        """List active device sessions."""
+        res = await self._request("GET", "/api/v1/sessions")
+        return res if isinstance(res, list) else []
+
+    async def revoke_session(self, session_id: str) -> dict[str, Any]:
+        """Revoke specific device session."""
+        return await self._request("DELETE", f"/api/v1/sessions/{session_id}")
+
+    async def get_record(self, record_id: str) -> dict[str, Any]:
+        """Fetch single encrypted record by record_id."""
+        return await self._request("GET", f"/api/v1/records/{record_id}")
 
     async def create_record(
         self,

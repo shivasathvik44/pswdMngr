@@ -30,6 +30,7 @@ class SettingsScreen(QWidget):
     def __init__(self, session: VaultSession, parent: QWidget | None = None):
         super().__init__(parent)
         self.session = session
+        self.session.add_lock_callback(self.clear_sensitive_inputs)
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -219,12 +220,25 @@ class SettingsScreen(QWidget):
             on_finally=lambda: self.save_acc_pwd_btn.setEnabled(True),
         )
 
+    def clear_sensitive_inputs(self) -> None:
+        """Clear all sensitive password fields and feedback on vault lock."""
+        self.current_acc_pwd.clear()
+        self.new_acc_pwd.clear()
+        self.new_master_pwd.clear()
+        self.confirm_master_pwd.clear()
+        self.feedback_banner.hide()
+        self.master_strength.update_strength("")
+
     def _on_acc_pwd_success(self, _: Any) -> None:
+        if not self.session.is_authenticated:
+            return
         self._show_feedback("✓ Account password updated successfully.", is_error=False)
         self.current_acc_pwd.clear()
         self.new_acc_pwd.clear()
 
     def _on_rotate_master_pwd_clicked(self) -> None:
+        if not self.session.is_unlocked:
+            return
         new_pwd = self.new_master_pwd.text()
         confirm_pwd = self.confirm_master_pwd.text()
 
@@ -244,11 +258,13 @@ class SettingsScreen(QWidget):
         run_async(
             self.session.rotate_vault_master_password(new_pwd),
             on_success=self._on_rotate_master_pwd_success,
-            on_error=lambda exc: self._show_feedback(f"Failed to rotate master password: {exc}", is_error=True),
+            on_error=lambda exc: self._show_feedback(f"Failed to rotate master password: {exc}", is_error=True) if self.session.is_unlocked else None,
             on_finally=self._on_rotate_master_pwd_finally,
         )
 
     def _on_rotate_master_pwd_success(self, _: Any) -> None:
+        if not self.session.is_unlocked:
+            return
         self._show_feedback("✓ Master password rotated successfully. VEK re-wrapped on server.", is_error=False)
         self.new_master_pwd.clear()
         self.confirm_master_pwd.clear()

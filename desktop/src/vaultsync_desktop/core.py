@@ -48,6 +48,7 @@ class VaultSession:
 
         # Vault state (only populated when unlocked)
         self.is_unlocked: bool = False
+        self.lock_generation: int = 0
         self._vault_key: Optional[VaultKey] = None
         self.items: dict[str, VaultItem] = {}
         self.sync_cursor: int = 0
@@ -84,9 +85,11 @@ class VaultSession:
         """Securely lock the vault.
         
         Clears unwrapped VEK from memory, purges decrypted vault items,
+        increments lock generation to invalidate in-flight async tasks,
         and triggers UI lock notifications.
         """
         self.is_unlocked = False
+        self.lock_generation += 1
         clear_key_material(self._vault_key)
         self._vault_key = None
         self.items.clear()
@@ -200,11 +203,28 @@ class VaultSession:
         if not self.is_unlocked or not self._vault_key:
             raise ApiError("Vault must be unlocked to synchronize records.")
 
-        sync_data = await self.api.fetch_sync(since_cursor=self.sync_cursor, limit=100)
+        gen = self.lock_generation
+        try:
+            sync_data = await self.api.fetch_sync(since_cursor=self.sync_cursor, limit=100)
+        except AuthenticationError:
+            self.lock()
+            self.session_token = None
+            if self.username:
+                self.storage.delete_session_token(self.username)
+            raise
+
+        if not self.is_unlocked or self.lock_generation != gen or not self._vault_key:
+            logger.info("Sync aborted: vault locked while fetching updates.")
+            return
+
         items = sync_data.get("items", [])
         next_cursor = sync_data.get("next_cursor", self.sync_cursor)
 
         for rec in items:
+            if not self.is_unlocked or self.lock_generation != gen or not self._vault_key:
+                logger.info("Sync iteration stopped: vault locked.")
+                return
+
             record_id = rec.get("record_id")
             is_deleted = rec.get("is_deleted", False)
             revision = rec.get("revision", 1)
@@ -216,6 +236,9 @@ class VaultSession:
                 if ciphertext_payload:
                     try:
                         env = EncryptedRecordEnvelope.from_json(ciphertext_payload)
+                        if env.record_id != record_id:
+                            logger.error("Envelope record_id %s mismatch with response %s", env.record_id, record_id)
+                            continue
                         decrypted_bytes = decrypt_record(self._vault_key, env)
                         vault_item = VaultItem.from_secret_json(
                             record_id=record_id,
@@ -226,6 +249,8 @@ class VaultSession:
                     except Exception as exc:
                         logger.error("Failed to decrypt record %s: %s", record_id, exc)
 
+        if not self.is_unlocked or self.lock_generation != gen:
+            return
         self.sync_cursor = next_cursor
 
     async def save_item(self, item: VaultItem) -> VaultItem:
@@ -234,21 +259,33 @@ class VaultSession:
             raise ApiError("Vault must be unlocked to save records.")
 
         self.register_activity()
+        gen = self.lock_generation
         plaintext_json = item.to_secret_json()
         env = encrypt_record(self._vault_key, item.id, plaintext_json)
         ciphertext_json = env.to_json()
 
         is_new = item.id not in self.items
-        if is_new:
-            res = await self.api.create_record(record_id=item.id, ciphertext_payload=ciphertext_json)
-            item.revision = res.get("revision", 1)
-        else:
-            res = await self.api.update_record(
-                record_id=item.id,
-                expected_revision=item.revision,
-                ciphertext_payload=ciphertext_json,
-            )
-            item.revision = res.get("revision", item.revision + 1)
+        try:
+            if is_new:
+                res = await self.api.create_record(record_id=item.id, ciphertext_payload=ciphertext_json)
+                item.revision = res.get("revision", 1)
+            else:
+                res = await self.api.update_record(
+                    record_id=item.id,
+                    expected_revision=item.revision,
+                    ciphertext_payload=ciphertext_json,
+                )
+                item.revision = res.get("revision", item.revision + 1)
+        except AuthenticationError:
+            self.lock()
+            self.session_token = None
+            if self.username:
+                self.storage.delete_session_token(self.username)
+            raise
+
+        if not self.is_unlocked or self.lock_generation != gen:
+            logger.info("Save discarded locally: vault locked while awaiting server response.")
+            return item
 
         self.items[item.id] = item
         return item
@@ -259,11 +296,23 @@ class VaultSession:
             raise ApiError("Vault must be unlocked to delete records.")
 
         self.register_activity()
+        gen = self.lock_generation
         item = self.items.get(item_id)
         if not item:
             return
 
-        await self.api.delete_record(record_id=item_id, expected_revision=item.revision)
+        try:
+            await self.api.delete_record(record_id=item_id, expected_revision=item.revision)
+        except AuthenticationError:
+            self.lock()
+            self.session_token = None
+            if self.username:
+                self.storage.delete_session_token(self.username)
+            raise
+
+        if not self.is_unlocked or self.lock_generation != gen:
+            return
+
         self.items.pop(item_id, None)
 
     # ------------------------------------------------------------------------
@@ -282,7 +331,19 @@ class VaultSession:
         if not self.is_unlocked or not self._vault_key:
             raise ApiError("Vault must be unlocked to rotate master password.")
 
+        gen = self.lock_generation
         new_salt_b64, new_envelope_json = rotate_master_password(self._vault_key, new_master_password)
-        await self.api.update_vault_key(wrapped_vault_key=new_envelope_json, kdf_salt=new_salt_b64)
+        try:
+            await self.api.update_vault_key(wrapped_vault_key=new_envelope_json, kdf_salt=new_salt_b64)
+        except AuthenticationError:
+            self.lock()
+            self.session_token = None
+            if self.username:
+                self.storage.delete_session_token(self.username)
+            raise
+
+        if not self.is_unlocked or self.lock_generation != gen:
+            return
+
         self.kdf_salt = new_salt_b64
         self.wrapped_vault_key = new_envelope_json

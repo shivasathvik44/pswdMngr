@@ -148,10 +148,22 @@ class RegisterScreen(QWidget):
 
         run_async(
             _do_register_flow(),
-            on_success=lambda _: self.registered_success.emit(),
+            on_success=self._on_register_success,
             on_error=lambda exc: self._show_error(f"Registration failed: {exc}"),
             on_finally=self._on_register_finally,
         )
+
+    def _on_register_success(self, _: None) -> None:
+        self.clear_sensitive_inputs()
+        self.registered_success.emit()
+
+    def clear_sensitive_inputs(self) -> None:
+        """Clear all password fields and strength guidance."""
+        self.account_pwd_input.clear()
+        self.master_pwd_input.clear()
+        self.confirm_pwd_input.clear()
+        self.strength_widget.update_strength("")
+        self.status_banner.hide()
 
     def _on_register_finally(self) -> None:
         self.submit_btn.setEnabled(True)

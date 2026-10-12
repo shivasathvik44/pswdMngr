@@ -317,3 +317,20 @@ async def update_vault_key(
     account.updated_at = datetime.now(timezone.utc)
     db.commit()
     return {"status": "ok", "message": "Wrapped vault key updated successfully"}
+
+
+@router.get(
+    "/vault-key",
+    status_code=status.HTTP_200_OK,
+    summary="Retrieve current wrapped vault key envelope and salt",
+)
+async def get_vault_key(
+    auth_data: Annotated[tuple[Account, Session], Depends(get_current_session)],
+) -> dict[str, str | None]:
+    """Retrieve the current wrapped vault key envelope and KDF salt for the calling session."""
+    account, _ = auth_data
+    return {
+        "wrapped_vault_key": account.wrapped_vault_key,
+        "kdf_salt": account.kdf_salt,
+    }
+

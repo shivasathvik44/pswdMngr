@@ -196,3 +196,76 @@ def test_no_secret_leakage_in_ui_or_errors(qapp, mock_session):
     assert secret_pw not in banner_text
     assert "VEK" not in banner_text or "vault key" in banner_text.lower()
     assert "raw_bytes" not in banner_text
+
+
+def test_screen_clearing_on_vault_lock(qapp, mock_session):
+    """Verify that locking the vault wipes all plaintext fields across all screens."""
+    window = MainWindow(mock_session)
+    window.show()
+
+    mock_session.is_unlocked = True
+    item = VaultItem(
+        title="Decrypted Secret Entry",
+        username="admin",
+        password="TopSecretPassword123!",
+        url="https://secret.com",
+        notes="Classified memo",
+    )
+    mock_session.items[item.id] = item
+
+    # Load item into editor
+    window.vault_screen.reload_items()
+    window.vault_screen._load_item_into_editor(item)
+    window.settings_screen.current_acc_pwd.setText("CurrentAccPw123!")
+    window.settings_screen.new_master_pwd.setText("NewMasterPw123!")
+    window.register_screen.account_pwd_input.setText("RegisterAccPw123!")
+
+    assert window.vault_screen.password_input.text() == "TopSecretPassword123!"
+    assert window.vault_screen.notes_input.toPlainText() == "Classified memo"
+    assert window.settings_screen.current_acc_pwd.text() == "CurrentAccPw123!"
+
+    # Trigger Lock
+    mock_session.lock()
+
+    # Verify VaultScreen is sanitized
+    assert window.vault_screen.current_item_id is None
+    assert window.vault_screen.title_input.text() == ""
+    assert window.vault_screen.username_input.text() == ""
+    assert window.vault_screen.password_input.text() == ""
+    assert window.vault_screen.url_input.text() == ""
+    assert window.vault_screen.notes_input.toPlainText() == ""
+    assert window.vault_screen.search_input.text() == ""
+    assert window.vault_screen.item_list.count() == 0
+    assert window.vault_screen.editor_widget.isHidden() is True
+    assert not window.vault_screen.placeholder_widget.isHidden()
+
+    # Verify SettingsScreen is sanitized
+    assert window.settings_screen.current_acc_pwd.text() == ""
+    assert window.settings_screen.new_acc_pwd.text() == ""
+    assert window.settings_screen.new_master_pwd.text() == ""
+    assert window.settings_screen.confirm_master_pwd.text() == ""
+
+    # Verify RegisterScreen is sanitized
+    window.register_screen.clear_sensitive_inputs()
+    assert window.register_screen.account_pwd_input.text() == ""
+    assert window.register_screen.master_pwd_input.text() == ""
+    assert window.register_screen.confirm_pwd_input.text() == ""
+
+
+def test_passphrase_strength_widget_entropy_guidance(qapp):
+    """Verify PassphraseStrengthWidget conveys heuristic limits and offline cracking awareness."""
+    from vaultsync_desktop.ui.widgets.passphrase_strength import PassphraseStrengthWidget
+
+    widget = PassphraseStrengthWidget()
+    widget.show()
+
+    # Weak password
+    widget.update_strength("weak")
+    assert "Weak" in widget.label.text()
+    assert "offline" in widget.advice_label.text().lower()
+
+    # Diceware multi-word passphrase
+    widget.update_strength("correct horse battery staple elephant")
+    assert "Heuristic" in widget.label.text()
+    assert "Diceware" in widget.advice_label.text() or "offline" in widget.advice_label.text().lower()
+

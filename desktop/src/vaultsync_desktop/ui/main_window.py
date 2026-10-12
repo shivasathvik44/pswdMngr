@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QStackedWidget,
     QVBoxLayout,
@@ -164,6 +165,7 @@ class MainWindow(QMainWindow):
         self._update_header_state()
 
     def _goto_register(self) -> None:
+        self.register_screen.clear_sensitive_inputs()
         self.stack.setCurrentIndex(self.SCREEN_REGISTER)
         self._update_header_state()
 
@@ -192,11 +194,28 @@ class MainWindow(QMainWindow):
     def _on_vault_locked(self) -> None:
         """Invoked on manual lock or auto-lock timeout."""
         self._update_header_state()
+        # Immediately wipe sensitive UI state from all screens
+        self.vault_screen.clear_vault_ui()
+        self.settings_screen.clear_sensitive_inputs()
+
+        # Reject any active confirmation dialogs
+        for box in self.findChildren(QMessageBox):
+            try:
+                box.reject()
+            except Exception:
+                pass
+
         if self.session.is_authenticated:
             self.login_screen.show_unlock_prompt(self.session.username)
         else:
             self.login_screen.reset_to_login()
         self.stack.setCurrentIndex(self.SCREEN_LOGIN)
+
+    def closeEvent(self, event) -> None:
+        """Ensure vault is locked and timers stopped upon window close."""
+        self.auto_lock_timer.stop()
+        self.session.lock()
+        super().closeEvent(event)
 
     def _on_request_logout(self) -> None:
         run_async(self.session.logout(), on_finally=self._goto_login)

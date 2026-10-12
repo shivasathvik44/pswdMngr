@@ -45,6 +45,7 @@ VaultSync enforces strict cryptographic credential separation between client-sid
 | `PUT` | `/api/v1/auth/password` | Change account password (invalidates other sessions) | Yes |
 | `GET` | `/api/v1/auth/salt` | Fetch user public KDF salt | No |
 | `PUT` | `/api/v1/auth/vault-key` | Upload/update wrapped vault key envelope and salt | Yes |
+| `GET` | `/api/v1/auth/vault-key` | Retrieve current wrapped vault key envelope and salt | Yes |
 | `GET` | `/api/v1/sessions` | List active sessions for account | Yes |
 | `DELETE`| `/api/v1/sessions/{id}` | Revoke specific device session | Yes |
 | `DELETE`| `/api/v1/sessions` | Revoke all sessions for account | Yes |
@@ -161,6 +162,18 @@ VaultSync enforces strict cryptographic credential separation between client-sid
     "message": "Wrapped vault key updated successfully"
   }
   ```
+
+#### `GET /api/v1/auth/vault-key`
+- **Headers**: `Authorization: Bearer <session_token>`
+- **Response 200 OK**:
+  ```json
+  {
+    "wrapped_vault_key": "<json_string_wrapped_key_envelope_or_null>",
+    "kdf_salt": "MDEyMzQ1Njc4OWFiY2RlZg=="
+  }
+  ```
+- **Error Responses**:
+  - `401 Unauthorized`: Invalid or expired session.
 
 #### `GET /api/v1/auth/salt?username=alice`
 - **Response 200 OK**:

@@ -112,11 +112,34 @@ def rotate_master_password(
 def evaluate_passphrase_strength(passphrase: str) -> tuple[int, str, list[str]]:
     """Assess passphrase strength with emphasis on multi-word passphrases (Diceware style).
 
+    LIMITS OF HEURISTIC SCORING & SHANNON ENTROPY:
+    The score (0-100) returned here is a heuristic quality score for user guidance,
+    NOT measured cryptographic entropy. Statistical or Shannon entropy estimates on
+    human-chosen text significantly overestimate real security because human choices
+    suffer from severe cognitive biases, common vocabularies, and syntactic predictability.
+
+    TRUE MEASURED ENTROPY REQUIRES UNBIASED RANDOM SELECTION:
+    To achieve true measured cryptographic entropy, words MUST be selected randomly
+    using a CSPRNG or physical dice from an established wordlist (e.g. the standard
+    7,776-word Diceware list where log2(7776) ≈ 12.92 bits per word):
+    - 4 randomly chosen words provide ~51.7 bits of entropy.
+    - 5 randomly chosen words provide ~64.6 bits of entropy (recommended minimum).
+    - 6 randomly chosen words provide ~77.5 bits of entropy.
+
+    OFFLINE GUESSING THREAT MODEL:
+    An attacker who compromises the server database obtains the public KDF salt and
+    wrapped VEK ciphertext. This enables offline dictionary cracking attempts using
+    Argon2id. A truly random, high-entropy passphrase is the primary barrier preventing
+    offline key recovery.
+
     Returns:
         tuple: (score 0-100, label 'Weak'|'Moderate'|'Strong'|'Excellent', list of recommendations)
     """
     if not passphrase:
-        return 0, "Empty", ["Please enter a passphrase."]
+        return 0, "Empty", [
+            "Please enter a passphrase.",
+            "Recommendation: Use 5+ words randomly chosen from a Diceware wordlist (~12.9 bits/word).",
+        ]
 
     import unicodedata
     normalized = unicodedata.normalize("NFC", passphrase)
@@ -131,24 +154,26 @@ def evaluate_passphrase_strength(passphrase: str) -> tuple[int, str, list[str]]:
     recs: list[str] = []
     score = 0
 
-    # Word-based scoring (favors memorability and high entropy)
-    if len(words) >= 4 and length >= 16:
-        score += 70
+    # Word-based scoring (favors length and memorability)
+    if len(words) >= 5 and length >= 20:
+        score += 75
+    elif len(words) >= 4 and length >= 16:
+        score += 65
     elif len(words) >= 3 and length >= 12:
-        score += 50
+        score += 45
     elif len(words) >= 2 and length >= 10:
-        score += 30
+        score += 25
 
     # Length-based scoring
-    if length >= 20:
-        score += 30
-    elif length >= 14:
-        score += 20
+    if length >= 24:
+        score += 25
+    elif length >= 16:
+        score += 15
     elif length >= 10:
-        score += 10
+        score += 5
     else:
         score -= 20
-        recs.append("Minimum recommended length is 14 characters or 4 distinct words.")
+        recs.append("Minimum recommended length is 16+ characters or 4-5 distinct words.")
 
     # Character variety bonus
     has_upper = bool(re.search(r"[A-Z]", normalized))
@@ -163,14 +188,16 @@ def evaluate_passphrase_strength(passphrase: str) -> tuple[int, str, list[str]]:
 
     if score < 40:
         label = "Weak"
-        recs.append("An attacker with a stolen server database can test guesses offline. Use a stronger passphrase.")
+        recs.append("An attacker with a stolen server database can test guesses offline. Use 5+ random words.")
     elif score < 70:
         label = "Moderate"
-        recs.append("Consider adding 1-2 more random words for long-term offline resilience.")
+        recs.append("Heuristic score only. For true offline resilience (≥64 bits), use 5+ words randomly chosen from a Diceware list.")
     elif score < 90:
         label = "Strong"
+        recs.append("Heuristic estimate. Ensure words are randomly selected (e.g. Diceware) rather than predictable phrases.")
     else:
         label = "Excellent"
+        recs.append("Heuristic estimate: High. Protected against offline dictionary guessing if words were selected randomly.")
 
     return score, label, recs
 

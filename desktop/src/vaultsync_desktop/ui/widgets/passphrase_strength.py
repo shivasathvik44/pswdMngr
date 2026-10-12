@@ -50,7 +50,7 @@ class PassphraseStrengthWidget(QWidget):
         self.bar.setStyleSheet(
             f"QProgressBar::chunk {{ background-color: {color}; border-radius: 3px; }}"
         )
-        self.label.setText(f"Strength: <b>{label}</b> ({score}/100)")
+        self.label.setText(f"Strength: <b>{label}</b> ({score}/100) [Heuristic Guidance]")
         self.label.setStyleSheet(f"color: {color}; font-size: 11px;")
 
         if recs:
@@ -58,6 +58,7 @@ class PassphraseStrengthWidget(QWidget):
             self.advice_label.show()
         else:
             self.advice_label.setText(
-                "✓ Strong passphrase. Bounded against offline dictionary guessing via Argon2id."
+                "✓ High heuristic score. Note: True offline cracking resistance requires "
+                "random word selection (e.g. 5+ Diceware words yielding ≥64 bits true entropy)."
             )
             self.advice_label.show()

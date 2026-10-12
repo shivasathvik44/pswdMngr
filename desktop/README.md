@@ -105,8 +105,8 @@ python -m vaultsync_desktop.main --server http://127.0.0.1:8000
    - Optimistic concurrency control: if an item was modified remotely, saving raises a conflict notice preventing silent overwrites.
    - Sensitive field clipboard copy with automatic 30-second wipe (only clears if clipboard contents still match copied value).
 5. **Settings & Rotation**:
-   - Change Account Password: Sends current and new account passwords to `/auth/change-password`.
-   - Rotate Vault Master Password: Re-wraps the existing VEK with a new master password and uploads the new envelope to `/vault/keys` without needing to re-encrypt any existing vault records.
+   - Change Account Password: Sends current and new account passwords to `/api/v1/auth/password`.
+   - Rotate Vault Master Password: Re-wraps the existing VEK with a new master password and uploads the new envelope to `/api/v1/auth/vault-key` without needing to re-encrypt any existing vault records.
    - Configure auto-lock timeout.
 
 ---

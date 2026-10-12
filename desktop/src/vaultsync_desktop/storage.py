@@ -39,6 +39,11 @@ class TokenStorage:
             self._keyring_available = False
         return self._keyring_available
 
+    @property
+    def is_using_fallback(self) -> bool:
+        """True if system keyring is unavailable and volatile in-memory fallback is active."""
+        return not self._check_keyring()
+
     def save_session_token(self, username: str, token: str) -> None:
         """Store session token in Keyring or fallback."""
         if self._check_keyring():

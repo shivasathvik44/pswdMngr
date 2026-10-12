@@ -36,6 +36,7 @@ class VaultScreen(QWidget):
         super().__init__(parent)
         self.session = session
         self.current_item_id: Optional[str] = None
+        self.session.add_lock_callback(self.clear_vault_ui)
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -237,6 +238,23 @@ class VaultScreen(QWidget):
         if item:
             self._load_item_into_editor(item)
 
+    def clear_vault_ui(self) -> None:
+        """Immediately clear all sensitive decrypted fields, search queries, and lists upon vault lock."""
+        self.current_item_id = None
+        self.search_input.clear()
+        self.item_list.clear()
+        self.title_input.clear()
+        self.username_input.clear()
+        self.password_input.clear()
+        self.url_input.clear()
+        self.notes_input.clear()
+        self.meta_label.clear()
+        self.banner_label.hide()
+        self.editor_widget.hide()
+        self.placeholder_widget.show()
+        self.sync_status_label.setText("Locked")
+        self.sync_status_label.setStyleSheet("color: #FFA3A6; font-size: 11px;")
+
     def _show_placeholder(self) -> None:
         self.current_item_id = None
         self.editor_widget.hide()
@@ -307,11 +325,15 @@ class VaultScreen(QWidget):
         )
 
     def _on_save_success(self, saved: VaultItem) -> None:
+        if not self.session.is_unlocked:
+            return
         self._show_banner("✓ Entry encrypted and saved successfully.", is_error=False)
         self.reload_items()
         self._load_item_into_editor(saved)
 
     def _on_save_error(self, exc: Exception) -> None:
+        if not self.session.is_unlocked:
+            return
         if isinstance(exc, ConflictError):
             self._show_banner(
                 "<b>Conflict Detected:</b> This item was modified on another device (revision mismatch). "
@@ -322,7 +344,7 @@ class VaultScreen(QWidget):
             self._show_banner(f"Failed to save item: {exc}", is_error=True)
 
     def _on_delete_clicked(self) -> None:
-        if not self.current_item_id:
+        if not self.current_item_id or not self.session.is_unlocked:
             return
 
         reply = QMessageBox.question(
@@ -337,23 +359,25 @@ class VaultScreen(QWidget):
             item_id = self.current_item_id
             run_async(
                 self.session.delete_item(item_id),
-                on_success=lambda _: (self.reload_items(), self._show_placeholder()),
-                on_error=lambda exc: self._show_banner(f"Failed to delete item: {exc}", is_error=True),
+                on_success=lambda _: (self.reload_items(), self._show_placeholder()) if self.session.is_unlocked else None,
+                on_error=lambda exc: self._show_banner(f"Failed to delete item: {exc}", is_error=True) if self.session.is_unlocked else None,
                 on_finally=lambda: self.delete_btn.setEnabled(True),
             )
 
     def _on_sync_clicked(self) -> None:
+        if not self.session.is_unlocked:
+            return
         self.sync_btn.setEnabled(False)
         self.sync_status_label.setText("Syncing...")
         self.sync_status_label.setStyleSheet("color: #E5A50A; font-size: 11px;")
 
         run_async(
             self.session.sync_records(),
-            on_success=lambda _: self.reload_items(),
+            on_success=lambda _: self.reload_items() if self.session.is_unlocked else None,
             on_error=lambda _: (
                 self.sync_status_label.setText("Sync failed"),
                 self.sync_status_label.setStyleSheet("color: #E01B24; font-size: 11px;"),
-            ),
+            ) if self.session.is_unlocked else None,
             on_finally=lambda: self.sync_btn.setEnabled(True),
         )
 
