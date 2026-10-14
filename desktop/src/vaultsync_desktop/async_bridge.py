@@ -5,9 +5,13 @@ and dispatches completion/error callbacks safely to the Qt main GUI thread.
 """
 
 import asyncio
+import logging
 import threading
 from typing import Any, Callable, Coroutine, Optional
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtWidgets import QApplication
+
+logger = logging.getLogger(__name__)
 
 
 class AsyncDispatcher(QObject):
@@ -16,9 +20,14 @@ class AsyncDispatcher(QObject):
     sig_success = Signal(object, object)  # (on_success, result)
     sig_error = Signal(object, object)    # (on_error, exception)
     sig_finally = Signal(object)          # (on_finally)
+    sig_call = Signal(object, tuple, dict)  # (func, args, kwargs)
 
     def __init__(self):
         super().__init__()
+        app = QApplication.instance()
+        if app is not None and self.thread() != app.thread():
+            self.moveToThread(app.thread())
+
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="VaultSync-AsyncLoop")
         self._thread.start()
@@ -27,22 +36,56 @@ class AsyncDispatcher(QObject):
         self.sig_success.connect(self._dispatch_success)
         self.sig_error.connect(self._dispatch_error)
         self.sig_finally.connect(self._dispatch_finally)
+        self.sig_call.connect(self._dispatch_call)
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
+    def stop(self) -> None:
+        """Cleanly stop the background event loop."""
+        if self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+
+    @Slot(object, object)
     def _dispatch_success(self, callback: Any, result: Any) -> None:
         if callable(callback):
-            callback(result)
+            try:
+                callback(result)
+            except RuntimeError as re:
+                logger.debug("Skipping on_success for deleted Qt object: %s", re)
+            except Exception as exc:
+                logger.error("Error in on_success callback: %s", exc)
 
+    @Slot(object, object)
     def _dispatch_error(self, callback: Any, exception: Any) -> None:
         if callable(callback):
-            callback(exception)
+            try:
+                callback(exception)
+            except RuntimeError as re:
+                logger.debug("Skipping on_error for deleted Qt object: %s", re)
+            except Exception as exc:
+                logger.error("Error in on_error callback: %s", exc)
 
+    @Slot(object)
     def _dispatch_finally(self, callback: Any) -> None:
         if callable(callback):
-            callback()
+            try:
+                callback()
+            except RuntimeError as re:
+                logger.debug("Skipping on_finally for deleted Qt object: %s", re)
+            except Exception as exc:
+                logger.error("Error in on_finally callback: %s", exc)
+
+    @Slot(object, tuple, dict)
+    def _dispatch_call(self, func: Any, args: tuple, kwargs: dict) -> None:
+        if callable(func):
+            try:
+                func(*args, **kwargs)
+            except RuntimeError as re:
+                logger.debug("Skipping call for deleted Qt object: %s", re)
+            except Exception as exc:
+                logger.error("Error executing callback on GUI thread: %s", exc)
 
     def run(
         self,
@@ -85,3 +128,24 @@ def run_async(
 ) -> asyncio.Future:
     """Convenience function to run a coroutine asynchronously with Qt GUI callbacks."""
     return get_dispatcher().run(coro, on_success=on_success, on_error=on_error, on_finally=on_finally)
+
+
+def call_on_gui_thread(func: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+    """Execute func on the Qt main GUI thread safely.
+
+    If already on the Qt main GUI thread, or if no QApplication instance exists
+    (e.g. in headless unit tests), func is invoked immediately.
+    Otherwise, func is dispatched to the Qt main thread via the Qt event loop.
+    """
+    app = QApplication.instance()
+    if app is None:
+        func(*args, **kwargs)
+        return
+
+    gui_thread = app.thread()
+    if QThread.currentThread() == gui_thread:
+        func(*args, **kwargs)
+    else:
+        dispatcher = get_dispatcher()
+        dispatcher.sig_call.emit(func, args, kwargs)
+

@@ -37,11 +37,11 @@ class SettingsScreen(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(20, 20, 20, 20)
 
-        scroll = QScrollArea()
+        scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
 
-        container = QWidget()
+        container = QWidget(scroll)
         layout = QVBoxLayout(container)
         layout.setSpacing(20)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -61,7 +61,7 @@ class SettingsScreen(QWidget):
         layout.addLayout(header_row)
 
         # Feedback banner
-        self.feedback_banner = QLabel()
+        self.feedback_banner = QLabel(container)
         self.feedback_banner.setWordWrap(True)
         self.feedback_banner.hide()
         layout.addWidget(self.feedback_banner)
@@ -165,6 +165,7 @@ class SettingsScreen(QWidget):
             "<b>Warning:</b> If you lose your master password, your vault is <b>permanently unrecoverable</b>."
         )
         master_desc.setProperty("class", "warning-banner")
+        master_desc.setTextFormat(Qt.TextFormat.RichText)
         master_desc.setStyleSheet(
             "background-color: #382A15; border: 1px solid #E5A50A; border-radius: 6px; padding: 10px; color: #FFDE8A;"
         )
@@ -191,6 +192,15 @@ class SettingsScreen(QWidget):
 
         scroll.setWidget(container)
         main_layout.addWidget(scroll)
+
+    def showEvent(self, event) -> None:
+        """Synchronize displayed timeout with current session config on screen show."""
+        super().showEvent(event)
+        mins = self.session.config.auto_lock_minutes
+        idx_map = {1: 0, 5: 1, 15: 2, 30: 3, 60: 4}
+        self.timeout_combo.blockSignals(True)
+        self.timeout_combo.setCurrentIndex(idx_map.get(mins, 2))
+        self.timeout_combo.blockSignals(False)
 
     def _on_timeout_changed(self, idx: int) -> None:
         mins_map = {0: 1, 1: 5, 2: 15, 3: 30, 4: 60}
@@ -227,7 +237,7 @@ class SettingsScreen(QWidget):
         self.new_master_pwd.clear()
         self.confirm_master_pwd.clear()
         self.feedback_banner.hide()
-        self.master_strength.update_strength("")
+        self.master_strength.reset()
 
     def _on_acc_pwd_success(self, _: Any) -> None:
         if not self.session.is_authenticated:

@@ -23,18 +23,33 @@ class PassphraseStrengthWidget(QWidget):
 
         self.label = QLabel("Strength: Not evaluated")
         self.label.setProperty("class", "caption")
+        self.label.setTextFormat(Qt.TextFormat.RichText)
 
         self.advice_label = QLabel()
         self.advice_label.setWordWrap(True)
         self.advice_label.setProperty("class", "caption")
         self.advice_label.setStyleSheet("color: #A0A0B0; font-size: 11px;")
+        self.advice_label.hide()
 
         layout.addWidget(self.bar)
         layout.addWidget(self.label)
         layout.addWidget(self.advice_label)
 
+    def reset(self) -> None:
+        """Reset indicator to initial unevaluated state."""
+        self.bar.setValue(0)
+        self.bar.setStyleSheet("")
+        self.label.setText("Strength: Not evaluated")
+        self.label.setStyleSheet("")
+        self.advice_label.clear()
+        self.advice_label.hide()
+
     def update_strength(self, passphrase: str) -> None:
         """Recalculate score and update visual indicator."""
+        if not passphrase:
+            self.reset()
+            return
+
         score, label, recs = evaluate_passphrase_strength(passphrase)
         self.bar.setValue(score)
 

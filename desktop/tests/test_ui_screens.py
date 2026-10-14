@@ -418,6 +418,151 @@ def test_vault_screen_clipboard_cleared_on_lock(qapp, mock_session):
     assert screen.last_copied_text is None
 
 
+def test_settings_navigation_and_cross_thread_lock_safety(qapp, mock_session):
+    """Verify that locking from a background thread dispatches safely and opening Settings does not crash."""
+    import threading
+    from PySide6.QtCore import QThread
+
+    window = MainWindow(mock_session)
+    window.show()
+
+    mock_session.is_unlocked = True
+    window._on_unlocked_and_ready()
+    assert window.stack.currentIndex() == MainWindow.SCREEN_VAULT
+
+    # Invoke session.lock() from a background thread to simulate async logout or auth failure
+    bg_error = []
+    def bg_lock():
+        try:
+            assert QThread.currentThread() != qapp.thread()
+            mock_session.lock()
+        except Exception as exc:
+            bg_error.append(exc)
+
+    t = threading.Thread(target=bg_lock)
+    t.start()
+    t.join()
+
+    assert not bg_error
+    qapp.processEvents()
+
+    # Verify session is locked and UI wiped
+    assert mock_session.is_unlocked is False
+    assert window.stack.currentIndex() == MainWindow.SCREEN_LOGIN
+
+    # Re-authenticate and unlock
+    mock_session.is_unlocked = True
+    window._on_unlocked_and_ready()
+    assert window.stack.currentIndex() == MainWindow.SCREEN_VAULT
+
+    # Click Settings button and verify SettingsScreen renders without crash or segfault
+    window.settings_btn.click()
+    qapp.processEvents()
+    assert window.stack.currentIndex() == MainWindow.SCREEN_SETTINGS
+    assert window.settings_screen.isVisible()
+
+    # Navigate back to Vault via header back button
+    window.settings_screen.back_to_vault.emit()
+    qapp.processEvents()
+    assert window.stack.currentIndex() == MainWindow.SCREEN_VAULT
+
+
+def test_passphrase_strength_widget_reset(qapp):
+    """Verify PassphraseStrengthWidget reset and empty string handling."""
+    from vaultsync_desktop.ui.widgets.passphrase_strength import PassphraseStrengthWidget
+
+    widget = PassphraseStrengthWidget()
+    widget.show()
+
+    # Set strong passphrase
+    widget.update_strength("Correct-Horse-Battery-Staple-2026!")
+    assert widget.bar.value() > 0
+    assert "Not evaluated" not in widget.label.text()
+    assert widget.advice_label.isVisible()
+
+    # Reset
+    widget.reset()
+    assert widget.bar.value() == 0
+    assert widget.label.text() == "Strength: Not evaluated"
+    assert widget.advice_label.isHidden()
+
+    # Empty string should trigger reset
+    widget.update_strength("TemporaryPass123!")
+    assert widget.bar.value() > 0
+    widget.update_strength("")
+    assert widget.bar.value() == 0
+    assert widget.label.text() == "Strength: Not evaluated"
+    assert widget.advice_label.isHidden()
+
+
+def test_call_on_gui_thread_dispatches_safely(qapp):
+    """Verify call_on_gui_thread dispatches to the main GUI thread from any thread."""
+    import threading
+    from PySide6.QtCore import QThread
+    from vaultsync_desktop.async_bridge import call_on_gui_thread
+
+    # 1. Calling directly from GUI thread executes synchronously
+    executed_sync = []
+    call_on_gui_thread(lambda val: executed_sync.append(val), "sync_ok")
+    assert executed_sync == ["sync_ok"]
+
+    # 2. Calling from background thread executes on GUI thread
+    executed_async = []
+    execution_thread = []
+
+    def worker():
+        def task_on_gui():
+            executed_async.append("bg_ok")
+            execution_thread.append(QThread.currentThread())
+        call_on_gui_thread(task_on_gui)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+
+    # Before processEvents, queued slot has not run yet
+    qapp.processEvents()
+    assert executed_async == ["bg_ok"]
+    assert execution_thread[0] == qapp.thread()
+
+
+def test_settings_show_event_syncs_auto_lock_config(qapp, mock_session):
+    """Verify showEvent updates the combo box from config without triggering feedback banners."""
+    mock_session.config.auto_lock_minutes = 60
+    screen = SettingsScreen(mock_session)
+    screen.show()
+
+    # 60 minutes corresponds to index 4
+    assert screen.timeout_combo.currentIndex() == 4
+    # Feedback banner should remain hidden upon show
+    assert screen.feedback_banner.isHidden()
+
+    # Update config externally and re-show
+    mock_session.config.auto_lock_minutes = 1
+    screen.hide()
+    screen.show()
+    assert screen.timeout_combo.currentIndex() == 0
+    assert screen.feedback_banner.isHidden()
+
+
+def test_session_remove_lock_callback(mock_session):
+    """Verify remove_lock_callback successfully unregisters callbacks."""
+    calls = []
+    cb = lambda: calls.append(1)
+
+    mock_session.add_lock_callback(cb)
+    mock_session.lock()
+    assert len(calls) == 1
+
+    mock_session.remove_lock_callback(cb)
+    mock_session.lock()
+    assert len(calls) == 1  # Not called again
+
+
+
+
+
+
 
 
 

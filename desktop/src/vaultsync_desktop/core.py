@@ -27,6 +27,7 @@ from vaultsync_desktop.crypto import (
     rotate_master_password,
     unlock_vault_with_master_password,
 )
+from vaultsync_desktop.async_bridge import call_on_gui_thread
 from vaultsync_desktop.models import VaultItem
 from vaultsync_desktop.storage import AppConfig, TokenStorage
 
@@ -83,12 +84,17 @@ class VaultSession:
         """Register callback invoked whenever vault locks."""
         self.on_lock_callbacks.append(callback)
 
+    def remove_lock_callback(self, callback: Callable[[], None]) -> None:
+        """Unregister callback invoked whenever vault locks."""
+        if callback in self.on_lock_callbacks:
+            self.on_lock_callbacks.remove(callback)
+
     def lock(self) -> None:
         """Securely lock the vault.
         
         Clears unwrapped VEK from memory, purges decrypted vault items,
         increments lock generation to invalidate in-flight async tasks,
-        and triggers UI lock notifications.
+        and triggers UI lock notifications on the Qt main GUI thread.
         """
         self.is_unlocked = False
         self.lock_generation += 1
@@ -97,11 +103,11 @@ class VaultSession:
         self.items.clear()
         self.sync_cursor = 0
 
-        for cb in self.on_lock_callbacks:
+        for cb in list(self.on_lock_callbacks):
             try:
-                cb()
+                call_on_gui_thread(cb)
             except Exception as exc:
-                logger.error("Error in on_lock callback: %s", exc)
+                logger.error("Error dispatching on_lock callback: %s", exc)
 
     async def logout(self) -> None:
         """Revoke session token on server and lock local vault."""
