@@ -1,10 +1,12 @@
 """Authentication and account lifecycle endpoints."""
 
+import hashlib
+import hmac
 from datetime import datetime, timedelta, timezone
-from typing import Annotated
+from typing import Annotated, Final
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session as DbSession
 
 from vaultsync_server.api.dependencies import get_current_session
@@ -18,17 +20,28 @@ from vaultsync_server.api.schemas import (
     VaultKeyUpdateRequest,
 )
 from vaultsync_server.config import settings
-from vaultsync_server.crypto.envelope import WrappedKeyEnvelope, b64decode
+from vaultsync_server.crypto.envelope import WrappedKeyEnvelope, b64decode, b64encode
 from vaultsync_server.crypto.errors import CryptoError
 from vaultsync_server.db.base import get_db
 from vaultsync_server.db.models import Account, Session
 from vaultsync_server.services.auth import (
+    DUMMY_PASSWORD_HASH,
     db_rate_limiter,
     generate_session_token,
     hash_password,
     rate_limiter,
     verify_password,
 )
+
+SYNTHETIC_SALT_KEY: Final[bytes] = hashlib.sha256(b"vaultsync:salt:synthetic:v1").digest()
+
+
+def generate_synthetic_salt(username: str) -> str:
+    """Generate deterministic, valid-format 16-byte base64 salt for non-existent users."""
+    normalized = username.strip().lower().encode("utf-8")
+    raw = hmac.new(SYNTHETIC_SALT_KEY, normalized, hashlib.sha256).digest()[:16]
+    return b64encode(raw)
+
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -76,8 +89,9 @@ async def register(
                 detail=f"Invalid wrapped_vault_key envelope: {exc}",
             )
 
-    # Check for existing username
-    stmt = select(Account).where(Account.username == req.username)
+    # Check for existing username case-insensitively to prevent identity collisions and rate-limit ambiguity
+    normalized_username = req.username.strip().lower()
+    stmt = select(Account).where(func.lower(Account.username) == normalized_username)
     existing = db.execute(stmt).scalar_one_or_none()
     if existing:
         db_rate_limiter.record_failure(db, rate_key)
@@ -118,8 +132,9 @@ async def login(
 ) -> LoginResponse:
     """Authenticate with independent server account password and issue a session bearer token."""
     client_ip = request.client.host if request.client else "unknown"
+    normalized_username = req.username.strip().lower()
     ip_key = f"auth:ip:{client_ip}"
-    user_key = f"auth:user:{req.username}"
+    user_key = f"auth:user:{normalized_username}"
 
     if (
         db_rate_limiter.is_rate_limited(db, ip_key)
@@ -132,10 +147,12 @@ async def login(
             detail="Too many failed login attempts. Please wait before trying again.",
         )
 
-    stmt = select(Account).where(Account.username == req.username)
+    stmt = select(Account).where(func.lower(Account.username) == normalized_username)
     account = db.execute(stmt).scalar_one_or_none()
 
     if not account or not account.is_active:
+        # Constant-time dummy verification to mitigate username enumeration via timing attacks
+        verify_password(DUMMY_PASSWORD_HASH, req.account_password)
         db_rate_limiter.record_failure(db, ip_key)
         db_rate_limiter.record_failure(db, user_key)
         rate_limiter.record_failure(ip_key)
@@ -218,6 +235,7 @@ async def logout(
 async def change_account_password(
     req: AccountPasswordChangeRequest,
     auth_data: Annotated[tuple[Account, Session], Depends(get_current_session)],
+    request: Request,
     db: Annotated[DbSession, Depends(get_db)],
 ) -> dict[str, str]:
     """Change server account password.
@@ -227,12 +245,35 @@ async def change_account_password(
     Invalidates all other active sessions for the account.
     """
     account, current_session = auth_data
+    client_ip = request.client.host if request.client else "unknown"
+    pwd_key = f"auth:pwd:{account.id}"
+    ip_key = f"auth:pwd_ip:{client_ip}"
+
+    if (
+        db_rate_limiter.is_rate_limited(db, pwd_key)
+        or db_rate_limiter.is_rate_limited(db, ip_key)
+        or rate_limiter.is_rate_limited(pwd_key)
+        or rate_limiter.is_rate_limited(ip_key)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed password change attempts. Please wait before trying again.",
+        )
 
     if not verify_password(account.account_password_hash, req.current_password):
+        db_rate_limiter.record_failure(db, pwd_key)
+        db_rate_limiter.record_failure(db, ip_key)
+        rate_limiter.record_failure(pwd_key)
+        rate_limiter.record_failure(ip_key)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Current account password incorrect",
         )
+
+    db_rate_limiter.reset(db, pwd_key)
+    db_rate_limiter.reset(db, ip_key)
+    rate_limiter.reset(pwd_key)
+    rate_limiter.reset(ip_key)
 
     account.account_password_hash = hash_password(req.new_password)
     account.requires_password_migration = False
@@ -263,17 +304,34 @@ async def change_account_password(
 )
 async def get_user_salt(
     username: str,
+    request: Request,
     db: Annotated[DbSession, Depends(get_db)],
 ) -> SaltResponse:
-    """Retrieve public KDF salt associated with a username."""
-    stmt = select(Account).where(Account.username == username)
-    account = db.execute(stmt).scalar_one_or_none()
-    if not account:
+    """Retrieve public KDF salt associated with a username without disclosing account existence."""
+    client_ip = request.client.host if request.client else "unknown"
+    normalized_username = username.strip().lower()
+    ip_key = f"salt:ip:{client_ip}"
+
+    # Rate limit by IP to prevent rapid enumeration scraping and endpoint flooding
+    if db_rate_limiter.is_rate_limited(db, ip_key) or rate_limiter.is_rate_limited(ip_key):
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Account not found",
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many salt retrieval attempts. Please wait before trying again.",
         )
-    return SaltResponse(username=account.username, kdf_salt=account.kdf_salt)
+
+    # Record lookup attempt for IP rate limiting
+    db_rate_limiter.record_failure(db, ip_key)
+    rate_limiter.record_failure(ip_key)
+
+    stmt = select(Account).where(func.lower(Account.username) == normalized_username)
+    account = db.execute(stmt).scalar_one_or_none()
+    if account:
+        return SaltResponse(username=account.username, kdf_salt=account.kdf_salt)
+
+    # Return deterministic synthetic salt for non-existent account with HTTP 200
+    # Observers receive identical 200 OK responses with valid 16-byte base64 salts
+    synthetic_salt = generate_synthetic_salt(normalized_username)
+    return SaltResponse(username=username, kdf_salt=synthetic_salt)
 
 
 @router.put(

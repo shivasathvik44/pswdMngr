@@ -205,7 +205,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        if self.session.is_authenticated:
+        if getattr(self.session, "auth_expired", False):
+            self.session.auth_expired = False
+            self.login_screen.reset_to_login(expired=True)
+        elif self.session.is_authenticated:
             self.login_screen.show_unlock_prompt(self.session.username)
         else:
             self.login_screen.reset_to_login()
@@ -218,7 +221,11 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _on_request_logout(self) -> None:
-        run_async(self.session.logout(), on_finally=self._goto_login)
+        def _after_logout():
+            self.login_screen.reset_to_login(clear_username=True)
+            self._goto_login()
+
+        run_async(self.session.logout(), on_finally=_after_logout)
 
     def _update_header_state(self) -> None:
         if self.session.is_unlocked:

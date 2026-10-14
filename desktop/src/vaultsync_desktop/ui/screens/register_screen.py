@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from vaultsync_desktop.api_client import ConflictError, NetworkConnectionError
 from vaultsync_desktop.async_bridge import run_async
 from vaultsync_desktop.core import VaultSession
 from vaultsync_desktop.ui.widgets.passphrase_strength import PassphraseStrengthWidget
@@ -86,6 +87,12 @@ class RegisterScreen(QWidget):
         self.confirm_pwd_input = PasswordEdit(placeholder="Re-enter vault master password")
         card_layout.addWidget(self.confirm_pwd_input)
 
+        # Keyboard Enter navigation
+        self.username_input.returnPressed.connect(self.account_pwd_input.setFocus)
+        self.account_pwd_input.returnPressed.connect(self.master_pwd_input.setFocus)
+        self.master_pwd_input.returnPressed.connect(self.confirm_pwd_input.setFocus)
+        self.confirm_pwd_input.returnPressed.connect(self._on_register_clicked)
+
         # Status Banner
         self.status_banner = QLabel()
         self.status_banner.setWordWrap(True)
@@ -149,16 +156,25 @@ class RegisterScreen(QWidget):
         run_async(
             _do_register_flow(),
             on_success=self._on_register_success,
-            on_error=lambda exc: self._show_error(f"Registration failed: {exc}"),
+            on_error=self._handle_register_error,
             on_finally=self._on_register_finally,
         )
+
+    def _handle_register_error(self, exc: Exception) -> None:
+        if isinstance(exc, ConflictError):
+            self._show_error("Username is already registered. Please choose another username or log in.")
+        elif isinstance(exc, NetworkConnectionError):
+            self._show_error("Cannot connect to server. Please check your network connection and server URL.")
+        else:
+            self._show_error(f"Registration failed: {exc}")
 
     def _on_register_success(self, _: None) -> None:
         self.clear_sensitive_inputs()
         self.registered_success.emit()
 
     def clear_sensitive_inputs(self) -> None:
-        """Clear all password fields and strength guidance."""
+        """Clear all inputs, password fields, and strength guidance."""
+        self.username_input.clear()
         self.account_pwd_input.clear()
         self.master_pwd_input.clear()
         self.confirm_pwd_input.clear()

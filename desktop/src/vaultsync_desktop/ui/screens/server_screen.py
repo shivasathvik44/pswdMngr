@@ -60,6 +60,7 @@ class ServerScreen(QWidget):
 
         card_layout.addWidget(url_label)
         card_layout.addWidget(self.url_input)
+        self.url_input.returnPressed.connect(self._on_connect_clicked)
 
         # Notice
         notice = QLabel(

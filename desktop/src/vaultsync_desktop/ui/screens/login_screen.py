@@ -13,7 +13,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from vaultsync_desktop.api_client import AuthenticationError, MigrationRequiredError, RateLimitError
+from vaultsync_desktop.api_client import (
+    AuthenticationError,
+    MigrationRequiredError,
+    NetworkConnectionError,
+    RateLimitError,
+)
 from vaultsync_desktop.async_bridge import run_async
 from vaultsync_desktop.core import VaultSession
 from vaultsync_desktop.crypto import DecryptionFailedError
@@ -74,6 +79,10 @@ class LoginScreen(QWidget):
         self.account_pwd_input = PasswordEdit(placeholder="Enter server account password")
         page_login_layout.addWidget(self.account_pwd_input)
 
+        # Wire Enter key to trigger login
+        self.username_input.returnPressed.connect(self.account_pwd_input.setFocus)
+        self.account_pwd_input.returnPressed.connect(self._on_login_clicked)
+
         self.login_btn = QPushButton("Log In with Account Password")
         self.login_btn.setProperty("class", "primary")
         self.login_btn.clicked.connect(self._on_login_clicked)
@@ -114,6 +123,7 @@ class LoginScreen(QWidget):
 
         page_unlock_layout.addWidget(QLabel("Vault Master Password:"))
         self.master_pwd_input = PasswordEdit(placeholder="Enter vault master password")
+        self.master_pwd_input.returnPressed.connect(self._on_unlock_clicked)
         page_unlock_layout.addWidget(self.master_pwd_input)
 
         self.unlock_btn = QPushButton("Unlock Vault")
@@ -133,13 +143,18 @@ class LoginScreen(QWidget):
         card_layout.addWidget(self.stack)
         main_layout.addWidget(self.card)
 
-    def reset_to_login(self) -> None:
+    def reset_to_login(self, expired: bool = False, clear_username: bool = False) -> None:
         """Reset view to Step 1 (account login)."""
         self.stack.setCurrentIndex(0)
         self.title_label.setText("Log In to VaultSync")
+        if clear_username:
+            self.username_input.clear()
         self.account_pwd_input.clear()
         self.master_pwd_input.clear()
         self.status_banner.hide()
+        if expired:
+            self._show_warning("Your session has expired or was revoked. Please log in again with your account password.")
+
 
     def show_unlock_prompt(self, username: str) -> None:
         """Transition view to Step 2 (vault unlock)."""
@@ -180,6 +195,8 @@ class LoginScreen(QWidget):
             self._show_error("Invalid username or account password.")
         elif isinstance(exc, RateLimitError):
             self._show_error(f"Rate limit exceeded: {exc}")
+        elif isinstance(exc, NetworkConnectionError):
+            self._show_error("Cannot connect to server. Please check your network connection and server URL.")
         else:
             self._show_error(f"Login failed: {exc}")
 
@@ -218,7 +235,7 @@ class LoginScreen(QWidget):
         self.unlock_btn.setText("Unlock Vault")
 
     def _on_logout_clicked(self) -> None:
-        run_async(self.session.logout(), on_finally=self.reset_to_login)
+        run_async(self.session.logout(), on_finally=lambda: self.reset_to_login(clear_username=True))
 
     def _show_error(self, message: str) -> None:
         self.status_banner.setText(message)

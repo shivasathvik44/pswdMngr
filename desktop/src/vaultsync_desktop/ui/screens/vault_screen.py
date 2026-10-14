@@ -78,6 +78,7 @@ class VaultScreen(QWidget):
         # Search Bar
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("🔍 Search vault items...")
+        self.search_input.setClearButtonEnabled(True)
         self.search_input.textChanged.connect(self._on_search_changed)
         left_layout.addWidget(self.search_input)
 
@@ -103,13 +104,20 @@ class VaultScreen(QWidget):
         self.right_layout.setContentsMargins(20, 20, 20, 20)
         self.right_layout.setSpacing(12)
 
+        # Banner for feedback / errors / clipboard / deletions
+        self.banner_label = QLabel()
+        self.banner_label.setWordWrap(True)
+        self.banner_label.hide()
+        self.right_layout.addWidget(self.banner_label)
+
         # Empty State Placeholder
         self.placeholder_widget = QWidget()
         ph_layout = QVBoxLayout(self.placeholder_widget)
         ph_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        ph_label = QLabel("Select an entry to view or click '+ New Item' to create one.")
-        ph_label.setStyleSheet("color: #7A7A8E; font-size: 14px;")
-        ph_layout.addWidget(ph_label)
+        self.placeholder_label = QLabel("Select an entry to view or click '+ New Item' to create one.")
+        self.placeholder_label.setStyleSheet("color: #7A7A8E; font-size: 14px;")
+        self.placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ph_layout.addWidget(self.placeholder_label)
         self.right_layout.addWidget(self.placeholder_widget)
 
         # Editor Form Container
@@ -117,12 +125,6 @@ class VaultScreen(QWidget):
         editor_layout = QVBoxLayout(self.editor_widget)
         editor_layout.setContentsMargins(0, 0, 0, 0)
         editor_layout.setSpacing(10)
-
-        # Banner for feedback / errors / clipboard
-        self.banner_label = QLabel()
-        self.banner_label.setWordWrap(True)
-        self.banner_label.hide()
-        editor_layout.addWidget(self.banner_label)
 
         # Title
         editor_layout.addWidget(QLabel("Title:"))
@@ -163,6 +165,13 @@ class VaultScreen(QWidget):
         url_row.addWidget(self.copy_url_btn)
         editor_layout.addWidget(QLabel("Website URL:"))
         editor_layout.addLayout(url_row)
+
+        # Keyboard Enter navigation across form fields
+        self.title_input.returnPressed.connect(self.username_input.setFocus)
+        self.username_input.returnPressed.connect(self.password_input.setFocus)
+        self.password_input.returnPressed.connect(self.url_input.setFocus)
+        self.url_input.returnPressed.connect(self._on_save_clicked)
+
 
         # Notes
         editor_layout.addWidget(QLabel("Notes:"))
@@ -240,10 +249,17 @@ class VaultScreen(QWidget):
 
         self.item_list.blockSignals(False)
 
-        # Update sync badge
+        # Update sync badge and dynamic placeholder text
         count = len([i for i in self.session.items.values() if not i.is_deleted])
         self.sync_status_label.setText(f"✓ Synced ({count} items)")
         self.sync_status_label.setStyleSheet("color: #2EC27E; font-size: 11px;")
+
+        if count == 0:
+            self.placeholder_label.setText("Your vault is empty. Click '+ New Item' to create your first entry.")
+        elif self.item_list.count() == 0 and query:
+            self.placeholder_label.setText(f"No vault items matching '{self.search_input.text().strip()}'.")
+        else:
+            self.placeholder_label.setText("Select an entry to view or click '+ New Item' to create one.")
 
     def _on_search_changed(self, text: str) -> None:
         self.reload_items()
@@ -283,6 +299,12 @@ class VaultScreen(QWidget):
 
     def _show_placeholder(self) -> None:
         self.current_item_id = None
+        self.title_input.clear()
+        self.username_input.clear()
+        self.password_input.clear()
+        self.url_input.clear()
+        self.notes_input.clear()
+        self.meta_label.clear()
         self.editor_widget.hide()
         self.placeholder_widget.show()
         self.banner_label.hide()
@@ -292,6 +314,7 @@ class VaultScreen(QWidget):
         self.title_input.setText(item.title)
         self.username_input.setText(item.username)
         self.password_input.setText(item.password)
+        self.password_input.reset_reveal()
         self.url_input.setText(item.url)
         self.notes_input.setPlainText(item.notes)
         updated_str = (item.updated_at or "")[:19]
@@ -317,6 +340,7 @@ class VaultScreen(QWidget):
             return
         if self.current_item_id and self.current_item_id in self.session.items:
             self._load_item_into_editor(self.session.items[self.current_item_id])
+            self._show_banner("Changes discarded.", is_error=False)
         else:
             self._show_placeholder()
 
@@ -324,6 +348,7 @@ class VaultScreen(QWidget):
         self.item_list.clearSelection()
         self.current_item_id = None
         self.title_input.setText("New Item")
+        self.title_input.selectAll()
         self.username_input.clear()
         self.password_input.clear()
         self.url_input.clear()
@@ -335,6 +360,7 @@ class VaultScreen(QWidget):
         self.placeholder_widget.hide()
         self.editor_widget.show()
         self.title_input.setFocus()
+
 
     # ------------------------------------------------------------------------
     # Actions: Save, Delete, Sync
@@ -418,9 +444,17 @@ class VaultScreen(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             self.delete_btn.setEnabled(False)
             item_id = self.current_item_id
+
+            def _on_delete_success(_):
+                if not self.session.is_unlocked:
+                    return
+                self.reload_items()
+                self._show_placeholder()
+                self._show_banner("✓ Vault item deleted.", is_error=False)
+
             run_async(
                 self.session.delete_item(item_id),
-                on_success=lambda _: (self.reload_items(), self._show_placeholder()) if self.session.is_unlocked else None,
+                on_success=_on_delete_success,
                 on_error=lambda exc: self._show_banner(f"Failed to delete item: {exc}", is_error=True) if self.session.is_unlocked else None,
                 on_finally=lambda: self.delete_btn.setEnabled(True),
             )
@@ -455,21 +489,25 @@ class VaultScreen(QWidget):
         self.last_copied_text = text
         clear_seconds = self.session.config.clipboard_clear_seconds
 
-        self._show_banner(
-            f"📋 {field_name} copied to clipboard (will automatically clear in {clear_seconds}s).",
-            is_error=False,
-        )
+        if clear_seconds > 0:
+            self._show_banner(
+                f"📋 {field_name} copied to clipboard (will automatically clear in {clear_seconds}s).",
+                is_error=False,
+            )
 
-        # Schedule clearing timer that ONLY clears if clipboard still holds the copied value
-        def clear_if_matches():
-            current_clip = QApplication.clipboard().text()
-            if current_clip == text:
-                QApplication.clipboard().clear()
-                self.last_copied_text = None
-                if self.session.is_unlocked:
-                    self._show_banner("🔒 Clipboard cleared for security.", is_error=False)
+            # Schedule clearing timer that ONLY clears if clipboard still holds the copied value
+            def clear_if_matches():
+                current_clip = QApplication.clipboard().text()
+                if current_clip == text:
+                    QApplication.clipboard().clear()
+                    self.last_copied_text = None
+                    if self.session.is_unlocked:
+                        self._show_banner("🔒 Clipboard cleared for security.", is_error=False)
 
-        QTimer.singleShot(clear_seconds * 1000, clear_if_matches)
+            QTimer.singleShot(clear_seconds * 1000, clear_if_matches)
+        else:
+            self._show_banner(f"📋 {field_name} copied to clipboard.", is_error=False)
+
 
     def _show_banner(self, message: str, is_error: bool = False) -> None:
         self.banner_label.setText(message)

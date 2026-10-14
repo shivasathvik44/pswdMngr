@@ -6,13 +6,21 @@
 
 Because VaultSync operates on a strict zero-knowledge architecture, reliable and tested backup mechanisms are essential.
 
-### Types of Backups
-1. **Encrypted Client Export**: An encrypted archive containing all plaintext items encrypted with an independent backup key derived from the master password or a dedicated recovery passphrase. Stored securely offline.
-2. **Server Database Backup**: A raw snapshot of the server's SQLite or PostgreSQL database. Because the server database contains only wrapped keys and ciphertext blobs, the database backup is itself safe against casual observation, though still considered sensitive metadata.
+### Available & Planned Backups
+1. **Server Database Backup (Available)**: A raw snapshot of the server's SQLite or PostgreSQL database (`vaultsync.db`). Because the server database contains only wrapped keys and AES-256-GCM ciphertext blobs, the database snapshot contains zero plaintext data, though record counts, sizes, and timestamps remain visible metadata.
+2. **Encrypted Client Export (Planned Future Feature)**: An offline export containing plaintext entries encrypted under an independent export key. *Note: Not implemented in current Phase 5.x releases.*
 
 ---
 
-## 2. Recovery Scenarios
+## 2. Recovery Scenarios and Feature Matrix
+
+| Scenario | Supported Today | Mechanism / Tool | Does it Recover Vault Records? |
+| :--- | :--- | :--- | :--- |
+| **Lost / Replaced Device** | Yes | Log in with Account Password, unlock with Master Password | Yes |
+| **Forgotten Account Password** | Yes | Server CLI: `python -m vaultsync_server.scripts.admin_reset` | No (restores login only; requires Master Password to unlock) |
+| **Master Password Rotation** | Yes | Settings GUI / `rotate_vault_master_password()` | N/A (re-wraps existing VEK while vault is already unlocked) |
+| **Forgotten Master Password** | **No** | **None (Irrecoverable by Design)** | **No (Permanent data loss)** |
+| **Recovery Key / Recovery Phrase** | **No** | **Not implemented in codebase** | **N/A** |
 
 ### Scenario A: Lost or Destroyed Device
 - **Prerequisite**: User possesses both their Account Password and Vault Master Password.
@@ -26,7 +34,7 @@ Because VaultSync operates on a strict zero-knowledge architecture, reliable and
   7. The user revokes the lost device's session via `DELETE /api/v1/sessions/{id}`.
 
 ### Scenario B: Forgotten Server Account Password
-- **Prerequisite**: User has administrative access to the server host.
+- **Prerequisite**: User has administrative shell access to the server host.
 - **Semantics**:
   - The server account password can be administratively reset using the recovery CLI. To prevent password leakage into the Linux process table (`ps aux`, `/proc/<pid>/cmdline`) or shell history (CWE-214), passwords are never accepted as command-line arguments:
     ```bash
@@ -44,11 +52,18 @@ Because VaultSync operates on a strict zero-knowledge architecture, reliable and
 
 ### Scenario C: Lost Vault Master Password
 - **Impact**: **Permanently Irrecoverable by Design.**
-- **Statement**: Because the server never receives or stores the master password, KEK, or unencrypted VEK, there is **zero backdoor**, zero administrative override, and zero mathematical possibility of decrypting vault contents without the master password or an existing unencrypted backup.
-- **Anti-Pattern Rejection**: The server intentionally does not offer a "master password reset" feature, as such a feature would be mathematically dishonest and falsely imply that encrypted data could be recovered without the encryption key.
-- **Mitigation**: Users are prompted during vault initialization to safely store an emergency recovery kit offline (e.g. printed paper in a physical fireproof safe).
+- **Statement**: Because the server never receives or stores the master password, KEK, or unencrypted VEK, there is **zero backdoor**, zero administrative override, and zero mathematical possibility of decrypting vault contents without the master password.
+- **Absence of Recovery Keys**: There is **no recovery-key or recovery-phrase mechanism implemented** in the current VaultSync codebase. The server intentionally does not offer a "master password reset" feature, as such a feature would be mathematically dishonest and falsely imply that encrypted data could be recovered without the encryption key.
+- **Operational Recommendation**: Users must manually safeguard their Vault Master Password (e.g. written on physical paper stored in a fireproof safe). If the master password is lost, all vault contents are permanently lost.
 
-### Scenario D: Complete Server Failure / Loss
+### Scenario D: Live Master Password Rotation
+- **Prerequisite**: The vault must be currently UNLOCKED in the client application.
+- **Procedure**:
+  - The user enters a new master password in Settings.
+  - The client re-wraps the in-memory VEK under a newly derived KEK with a fresh salt and transmits the new `WrappedKeyEnvelope` to `PUT /api/v1/auth/vault-key`.
+  - Individual encrypted records do NOT need re-encryption because the raw VEK is preserved.
+
+### Scenario E: Complete Server Failure / Loss
 - **Prerequisite**: Client devices retain their local encrypted cache, or an offsite database snapshot exists.
 - **Procedure**:
   1. Provision a new server instance.

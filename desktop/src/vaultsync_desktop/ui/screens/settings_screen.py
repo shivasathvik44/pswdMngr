@@ -96,6 +96,22 @@ class SettingsScreen(QWidget):
         row_timeout.addWidget(self.timeout_combo)
         sec_lock_layout.addLayout(row_timeout)
 
+        row_clip = QHBoxLayout()
+        row_clip.addWidget(QLabel("Clear Clipboard Automatically:"))
+        self.clipboard_combo = QComboBox()
+        self.clipboard_combo.addItems([
+            "10 Seconds",
+            "30 Seconds",
+            "60 Seconds",
+            "Never",
+        ])
+        secs = self.session.config.clipboard_clear_seconds
+        clip_idx_map = {10: 0, 30: 1, 60: 2, 0: 3}
+        self.clipboard_combo.setCurrentIndex(clip_idx_map.get(secs, 1))
+        self.clipboard_combo.currentIndexChanged.connect(self._on_clipboard_timeout_changed)
+        row_clip.addWidget(self.clipboard_combo)
+        sec_lock_layout.addLayout(row_clip)
+
         btn_row = QHBoxLayout()
         lock_now_btn = QPushButton("🔒 Lock Vault Now")
         lock_now_btn.setProperty("class", "primary")
@@ -126,9 +142,11 @@ class SettingsScreen(QWidget):
 
         acc_desc = QLabel(
             "Updates your server login credential. Leaves vault encryption keys and "
-            "all encrypted records completely untouched."
+            "all encrypted records completely untouched.<br/>"
+            "<b>Note:</b> Changing your account password does NOT reset or recover a forgotten master password."
         )
         acc_desc.setProperty("class", "caption")
+        acc_desc.setTextFormat(Qt.TextFormat.RichText)
         acc_desc.setWordWrap(True)
         sec_acc_layout.addWidget(acc_desc)
 
@@ -139,6 +157,9 @@ class SettingsScreen(QWidget):
         sec_acc_layout.addWidget(QLabel("New Account Password (min 8 chars):"))
         self.new_acc_pwd = PasswordEdit(placeholder="Enter new account password")
         sec_acc_layout.addWidget(self.new_acc_pwd)
+
+        self.current_acc_pwd.returnPressed.connect(self.new_acc_pwd.setFocus)
+        self.new_acc_pwd.returnPressed.connect(self._on_change_account_pwd_clicked)
 
         self.save_acc_pwd_btn = QPushButton("Update Account Password")
         self.save_acc_pwd_btn.clicked.connect(self._on_change_account_pwd_clicked)
@@ -162,7 +183,8 @@ class SettingsScreen(QWidget):
             "<b>Re-wrapping Architecture:</b> Re-encrypts your 256-bit Vault Encryption Key (VEK) "
             "with a new salt and KEK derived from the new master password.<br/>"
             "<i>Records do not need to be re-encrypted because the underlying VEK is preserved.</i><br/><br/>"
-            "<b>Warning:</b> If you lose your master password, your vault is <b>permanently unrecoverable</b>."
+            "<b>Warning:</b> If you lose your master password, your vault is <b>permanently unrecoverable</b>. "
+            "Changing your account password cannot recover a forgotten master password."
         )
         master_desc.setProperty("class", "warning-banner")
         master_desc.setTextFormat(Qt.TextFormat.RichText)
@@ -184,11 +206,15 @@ class SettingsScreen(QWidget):
         self.confirm_master_pwd = PasswordEdit(placeholder="Confirm new master password")
         sec_master_layout.addWidget(self.confirm_master_pwd)
 
+        self.new_master_pwd.returnPressed.connect(self.confirm_master_pwd.setFocus)
+        self.confirm_master_pwd.returnPressed.connect(self._on_rotate_master_pwd_clicked)
+
         self.save_master_pwd_btn = QPushButton("Rotate Master Password (Re-wrap VEK)")
         self.save_master_pwd_btn.clicked.connect(self._on_rotate_master_pwd_clicked)
         sec_master_layout.addWidget(self.save_master_pwd_btn)
 
         layout.addWidget(sec_master)
+
 
         scroll.setWidget(container)
         main_layout.addWidget(scroll)
@@ -202,11 +228,24 @@ class SettingsScreen(QWidget):
         self.timeout_combo.setCurrentIndex(idx_map.get(mins, 2))
         self.timeout_combo.blockSignals(False)
 
+        secs = self.session.config.clipboard_clear_seconds
+        clip_idx_map = {10: 0, 30: 1, 60: 2, 0: 3}
+        self.clipboard_combo.blockSignals(True)
+        self.clipboard_combo.setCurrentIndex(clip_idx_map.get(secs, 1))
+        self.clipboard_combo.blockSignals(False)
+
     def _on_timeout_changed(self, idx: int) -> None:
         mins_map = {0: 1, 1: 5, 2: 15, 3: 30, 4: 60}
         self.session.config.auto_lock_minutes = mins_map.get(idx, 15)
         self.session.config.save()
         self._show_feedback("Auto-lock timeout updated.", is_error=False)
+
+    def _on_clipboard_timeout_changed(self, idx: int) -> None:
+        secs_map = {0: 10, 1: 30, 2: 60, 3: 0}
+        self.session.config.clipboard_clear_seconds = secs_map.get(idx, 30)
+        self.session.config.save()
+        self._show_feedback("Clipboard timeout updated.", is_error=False)
+
 
     def _on_new_master_pwd_changed(self, text: str) -> None:
         self.master_strength.update_strength(text)

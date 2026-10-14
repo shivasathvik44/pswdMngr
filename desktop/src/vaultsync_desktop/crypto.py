@@ -203,16 +203,34 @@ def evaluate_passphrase_strength(passphrase: str) -> tuple[int, str, list[str]]:
 
 
 def clear_key_material(key: Optional[VaultKey]) -> None:
-    """Best-effort clearing of key material references from memory.
+    """Best-effort zeroization and clearing of key material references from memory.
 
-    Note: Python's memory management and garbage collection cannot guarantee
-    immediate hardware zeroization of freed buffers.
+    Note on Python memory semantics:
+    Python's memory management, immutability of certain primitives, and OS virtual
+    memory paging preclude guaranteed hardware-level forensic erasure. This function
+    overwrites mutable internal byte buffers with zeros before clearing them.
+
+    Raises:
+        CryptoError: If a non-None key object does not expose a supported clearing interface.
     """
-    if key is not None:
-        try:
-            # Overwrite internal bytearray if present, or clear reference
-            if hasattr(key, "_raw") and isinstance(key._raw, bytearray):
-                for i in range(len(key._raw)):
-                    key._raw[i] = 0
-        except Exception:
-            pass
+    if key is None:
+        return
+
+    cleared = False
+    if hasattr(key, "clear") and callable(key.clear):
+        key.clear()
+        cleared = True
+    elif hasattr(key, "_key") and isinstance(key._key, bytearray):
+        for i in range(len(key._key)):
+            key._key[i] = 0
+        key._key.clear()
+        cleared = True
+    elif hasattr(key, "_raw") and isinstance(key._raw, bytearray):
+        for i in range(len(key._raw)):
+            key._raw[i] = 0
+        key._raw.clear()
+        cleared = True
+
+    if not cleared:
+        raise CryptoError("Failed to clear key material: object does not expose mutable key buffer or clear method")
+

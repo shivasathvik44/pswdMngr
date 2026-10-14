@@ -37,10 +37,15 @@ logger = logging.getLogger(__name__)
 class VaultSession:
     """Central state manager for authentication, vault keys, items, and auto-lock."""
 
-    def __init__(self, config: Optional[AppConfig] = None, storage: Optional[TokenStorage] = None):
+    def __init__(
+        self,
+        config: Optional[AppConfig] = None,
+        storage: Optional[TokenStorage] = None,
+        api: Optional[ApiClient] = None,
+    ):
         self.config = config or AppConfig()
         self.storage = storage or TokenStorage()
-        self.api = ApiClient(base_url=self.config.server_url)
+        self.api = api or ApiClient(base_url=self.config.server_url)
 
         # Account / Auth state
         self.username: str = ""
@@ -59,6 +64,7 @@ class VaultSession:
         # Activity & auto-lock
         self.last_activity_time: float = time.time()
         self.on_lock_callbacks: list[Callable[[], None]] = []
+        self.auth_expired: bool = False
 
     @property
     def is_authenticated(self) -> bool:
@@ -98,16 +104,30 @@ class VaultSession:
         """
         self.is_unlocked = False
         self.lock_generation += 1
-        clear_key_material(self._vault_key)
+        vk = self._vault_key
         self._vault_key = None
         self.items.clear()
         self.sync_cursor = 0
+        if vk is not None:
+            try:
+                clear_key_material(vk)
+            except Exception as exc:
+                logger.error("Error clearing vault key material on lock: %s", exc)
 
         for cb in list(self.on_lock_callbacks):
             try:
                 call_on_gui_thread(cb)
             except Exception as exc:
                 logger.error("Error dispatching on_lock callback: %s", exc)
+
+    def _handle_auth_failure(self) -> None:
+        """Handle 401 Unauthorized by clearing session state and resetting client token."""
+        self.auth_expired = True
+        self.lock()
+        self.session_token = None
+        self.api.set_session_token(None)
+        if self.username:
+            self.storage.delete_session_token(self.username)
 
     async def logout(self) -> None:
         """Revoke session token on server and lock local vault."""
@@ -120,6 +140,7 @@ class VaultSession:
             if self.username:
                 self.storage.delete_session_token(self.username)
             self.session_token = None
+            self.api.set_session_token(None)
             self.username = ""
             self.account_id = ""
             self.kdf_salt = ""
@@ -219,10 +240,7 @@ class VaultSession:
             try:
                 sync_data = await self.api.fetch_sync(since_cursor=self.sync_cursor, limit=100)
             except AuthenticationError:
-                self.lock()
-                self.session_token = None
-                if self.username:
-                    self.storage.delete_session_token(self.username)
+                self._handle_auth_failure()
                 raise
 
             if not self.is_unlocked or self.lock_generation != gen or not self._vault_key:
@@ -283,10 +301,7 @@ class VaultSession:
             self.items.pop(record_id, None)
             return None
         except AuthenticationError:
-            self.lock()
-            self.session_token = None
-            if self.username:
-                self.storage.delete_session_token(self.username)
+            self._handle_auth_failure()
             raise
 
         if not self.is_unlocked or self.lock_generation != gen or not self._vault_key:
@@ -339,10 +354,7 @@ class VaultSession:
             if "created_at" in res and not item.created_at:
                 item.created_at = str(res["created_at"])
         except AuthenticationError:
-            self.lock()
-            self.session_token = None
-            if self.username:
-                self.storage.delete_session_token(self.username)
+            self._handle_auth_failure()
             raise
 
         if not self.is_unlocked or self.lock_generation != gen:
@@ -368,10 +380,7 @@ class VaultSession:
         except NotFoundError:
             logger.info("Record %s already deleted or not found on server.", item_id)
         except AuthenticationError:
-            self.lock()
-            self.session_token = None
-            if self.username:
-                self.storage.delete_session_token(self.username)
+            self._handle_auth_failure()
             raise
 
         if not self.is_unlocked or self.lock_generation != gen:
@@ -397,17 +406,7 @@ class VaultSession:
 
         gen = self.lock_generation
         new_salt_b64, new_envelope_json = rotate_master_password(self._vault_key, new_master_password)
-        try:
-            await self.api.update_vault_key(wrapped_vault_key=new_envelope_json, kdf_salt=new_salt_b64)
-        except AuthenticationError:
-            self.lock()
-            self.session_token = None
-            if self.username:
-                self.storage.delete_session_token(self.username)
-            raise
-
-        if not self.is_unlocked or self.lock_generation != gen:
-            return
-
+        await self.api.update_vault_key(wrapped_vault_key=new_envelope_json, kdf_salt=new_salt_b64)
+        # Server accepted new wrapped key; synchronize local metadata immediately
         self.kdf_salt = new_salt_b64
         self.wrapped_vault_key = new_envelope_json

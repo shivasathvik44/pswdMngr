@@ -91,11 +91,14 @@ This document identifies security boundaries, adversaries, potential threats, de
 - **Limitations**: Corrupted records cannot be decrypted and require restoration from backup.
 
 ### 2.9 Backup Theft and Recovery Failures
-- **Threat**: An offline backup archive is stolen from external storage, or a backup cannot be restored due to missing key parameters.
-- **Mitigation**:
-  - Backup exports are encrypted with a dedicated backup key derived from the master password and a distinct salt, or a separate recovery passphrase.
-  - Backups include self-contained cryptographic headers (salt, Argon2 parameters, cipher version, MAC tag).
-- **Limitations**: Loss of both master password and recovery key results in permanent, irrecoverable data loss by design.
+- **Threat**: An offline backup archive is stolen from external storage, or database records cannot be restored due to loss of key material.
+- **Current Architecture & Mitigation**:
+  - The server database backup is a raw snapshot of `vaultsync.db`. Because the database contains only AES-256-GCM ciphertexts and wrapped keys, raw backup snapshots contain zero plaintext vault data.
+  - *Planned Feature*: Dedicated encrypted client JSON export protected under an independent export key. *(Not implemented in current release)*.
+- **Recovery Reality & Limitations**:
+  - VaultSync contains **no recovery-key or recovery-phrase mechanism**.
+  - Administrative server scripts (`admin_reset`) can reset account credentials, but **cannot decrypt or recover vault records**.
+  - Loss of the Vault Master Password results in **permanent, mathematically irreversible data loss by design**. Users must manually safeguard their master password offline.
 
 ### 2.10 Accidental Exposure Through Logs, Crash Reports, Git, or Config
 - **Threat**: Secrets, passwords, or keys leak into logs, commit history, or error traces.
@@ -144,3 +147,51 @@ This document identifies security boundaries, adversaries, potential threats, de
 ### 4.2 Multi-Worker and Multi-IP Abuse Limits
 - **Vulnerability**: Pure in-memory rate limiting without process sharing allows rotating IPs to bypass single-user limits, and multiple Uvicorn workers to dilute enforcement.
 - **Mitigation**: Dual-axis rate limiting (IP and username tracked separately). For production deployment, a database-backed rate limit table (`auth_rate_limits`) or shared persistent cache provides cluster-wide abuse prevention.
+
+---
+
+## 5. Phase 5 Comprehensive Security Audit & Remediation
+
+### 5.1 Login Timing Oracle & Username Enumeration Mitigation
+- **Weakness**: When `/api/v1/auth/login` received a non-existent username, it aborted immediately in $<1\text{ ms}$, whereas valid accounts ran server-side Argon2id taking $\approx 50\text{--}100\text{ ms}$. This latency difference enabled remote adversaries to enumerate registered usernames.
+- **Remediation**: The authentication service maintains a pre-computed valid Argon2id hash (`DUMMY_PASSWORD_HASH`). When an account lookup yields no active user, the server executes `verify_password(DUMMY_PASSWORD_HASH, req.account_password)`, equalizing verification latency and eliminating the timing oracle.
+
+### 5.2 Public Salt Retrieval & Password Change Abuse Controls
+- **Weakness**: `/api/v1/auth/salt` was unauthenticated and completely un-rate-limited, enabling dictionary scanners to probe account existence. Furthermore, `PUT /api/v1/auth/password` lacked attempt tracking on current password verification.
+- **Remediation**: Both endpoints now enforce dual-axis rate limiting (tracking IP and user identifiers). Failed lookups on `/salt` record abuse events and trigger `429 Too Many Requests` after threshold violations.
+
+### 5.3 Username Normalization in Rate Limit Keys
+- **Weakness**: Rate limiting tracked raw username strings, allowing attackers to bypass attempt counters by alternating case (`alice` vs `Alice` vs `ALICE`) or adding leading/trailing whitespace.
+- **Remediation**: All authentication and salt rate limit keys normalize usernames via `username.strip().lower()`.
+
+### 5.4 Unbounded Request Body Size / Memory Exhaustion (DoS)
+- **Weakness**: While `settings.max_payload_size_bytes` (2 MiB) was configured, it was never enforced by server middleware. Large payloads could consume server buffers and trigger memory exhaustion.
+- **Remediation**: Added `PayloadSizeLimitMiddleware` rejecting requests exceeding 2 MiB with `HTTP 413 Payload Too Large`.
+
+### 5.5 Defense-in-Depth HTTP Security Headers
+- **Weakness**: Responses lacked modern browser isolation headers (Content Security Policy, Cross-Origin Opener Policy, Cross-Origin Resource Policy).
+- **Remediation**: Enhanced `SecurityHeadersMiddleware` to inject:
+  - `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`
+  - `Cross-Origin-Opener-Policy: same-origin`
+  - `Cross-Origin-Resource-Policy: same-origin`
+  - `X-Content-Type-Options: nosniff`
+  - `X-Frame-Options: DENY`
+  - `Referrer-Policy: no-referrer`
+  - `Cache-Control: no-store, max-age=0`
+
+### 5.6 Client Memory Wiping & Key Buffer Zeroization
+- **Weakness**: `clear_key_material(key)` checked for `key._raw`, but `VaultKey` in `vaultsync_server.crypto.vault_keys` stores key material in `key._key`. Consequently, locking the vault failed to zeroize the underlying mutable `bytearray`.
+- **Remediation**: `clear_key_material` now invokes `key.clear()` and explicitly overwrites `key._key` with zeros, clearing the buffer.
+
+### 5.7 Credential Exposure in Representations & Logging
+- **Weakness**: `VaultItem` defaulted to standard Pydantic `repr`, printing plaintext passwords and confidential notes in string representations, debug logs, and unhandled exception traces.
+- **Remediation**: Added `repr=False` to `password` and `notes` fields in `VaultItem`. Plaintext secrets remain accessible in memory and in `to_secret_json()`, but will never appear in `repr(item)` or string logs.
+
+### 5.8 Session Token Clearance on Authentication Errors
+- **Weakness**: When desktop operations received HTTP 401 Unauthorized, `VaultSession` cleared `self.session_token = None` but did not notify the underlying `ApiClient`, leaving the invalid/stale bearer token attached to outgoing headers.
+- **Remediation**: Centralized 401 handling into `_handle_auth_failure()`, ensuring `self.api.set_session_token(None)` is invoked on all auth failures and logouts.
+
+### 5.9 Client Configuration File Permissions
+- **Weakness**: Configuration files and directories were created with default umask permissions, potentially allowing other local users on a multi-user Linux machine to inspect configuration metadata.
+- **Remediation**: Client now explicitly enforces POSIX `0700` directory and `0600` file permissions on `~/.config/vaultsync`.
+

@@ -114,6 +114,10 @@ class AppConfig:
         """Save configuration to JSON file."""
         try:
             self.config_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(self.config_dir, 0o700)
+            except Exception:
+                pass
             data = {
                 "server_url": self.server_url,
                 "last_username": self.last_username,
@@ -122,5 +126,9 @@ class AppConfig:
             }
             with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
+            try:
+                os.chmod(self.config_file, 0o600)
+            except Exception:
+                pass
         except Exception as exc:
             logger.warning("Failed to save config file (%s).", exc)

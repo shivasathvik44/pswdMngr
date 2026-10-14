@@ -28,6 +28,9 @@ _hasher = PasswordHasher(
     hash_len=32,
 )
 
+# Precomputed valid Argon2id hash used to prevent timing attacks / username enumeration on login
+DUMMY_PASSWORD_HASH: Final[str] = _hasher.hash("vaultsync-dummy-constant-time-padding-secret")
+
 
 def hash_password(password: str) -> str:
     """Hash the account password using Argon2id for secure database persistence."""
@@ -111,6 +114,7 @@ class DatabaseRateLimiter:
     def __init__(self, max_attempts: int, window_seconds: int) -> None:
         self.max_attempts = max_attempts
         self.window_seconds = window_seconds
+        self._last_prune_time: float = 0.0
 
     def is_rate_limited(self, db: DbSession, identifier: str) -> bool:
         """Check whether attempt count within window exceeds threshold."""
@@ -126,29 +130,50 @@ class DatabaseRateLimiter:
         return count >= self.max_attempts
 
     def record_failure(self, db: DbSession, identifier: str) -> None:
-        """Record a failed authentication event."""
+        """Record a failed authentication event and prune expired events at bounded intervals."""
         now = time.time()
+        # Bounded periodic pruning: execute at most once per window_seconds to prevent excessive write locks
+        if now - self._last_prune_time >= self.window_seconds:
+            cutoff = now - self.window_seconds
+            try:
+                db.execute(
+                    delete(AuthRateLimit)
+                    .where(AuthRateLimit.attempt_time <= cutoff)
+                    .execution_options(synchronize_session=False)
+                )
+                self._last_prune_time = now
+            except Exception:
+                pass
+
         event = AuthRateLimit(identifier=identifier, attempt_time=now)
         db.add(event)
         db.commit()
 
     def reset(self, db: DbSession, identifier: str) -> None:
         """Remove failure events for identifier upon successful authentication."""
-        stmt = delete(AuthRateLimit).where(AuthRateLimit.identifier == identifier)
+        stmt = (
+            delete(AuthRateLimit)
+            .where(AuthRateLimit.identifier == identifier)
+            .execution_options(synchronize_session=False)
+        )
         db.execute(stmt)
         db.commit()
 
     def prune_expired(self, db: DbSession) -> int:
         """Prune attempts older than the rate limiting window."""
         cutoff = time.time() - self.window_seconds
-        stmt = delete(AuthRateLimit).where(AuthRateLimit.attempt_time <= cutoff)
+        stmt = (
+            delete(AuthRateLimit)
+            .where(AuthRateLimit.attempt_time <= cutoff)
+            .execution_options(synchronize_session=False)
+        )
         result = db.execute(stmt)
         db.commit()
         return result.rowcount or 0
 
     def reset_all(self, db: DbSession) -> int:
         """Clear all rate limit attempt logs across all identifiers (for testing and administrative reset)."""
-        stmt = delete(AuthRateLimit)
+        stmt = delete(AuthRateLimit).execution_options(synchronize_session=False)
         result = db.execute(stmt)
         db.commit()
         return result.rowcount or 0

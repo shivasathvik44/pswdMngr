@@ -37,6 +37,12 @@ class PasswordEdit(QWidget):
             self.line_edit.setEchoMode(QLineEdit.EchoMode.Password)
             self.toggle_btn.setText("👁")
 
+    def reset_reveal(self) -> None:
+        """Reset visibility back to masked password mode."""
+        self._is_revealed = False
+        self.line_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.toggle_btn.setText("👁")
+
     def text(self) -> str:
         return self.line_edit.text()
 
@@ -45,7 +51,24 @@ class PasswordEdit(QWidget):
 
     def clear(self) -> None:
         self.line_edit.clear()
+        self.reset_reveal()
+
+    def setFocus(self) -> None:
+        self.line_edit.setFocus()
+
+    def selectAll(self) -> None:
+        self.line_edit.selectAll()
+
+    def setEnabled(self, enabled: bool) -> None:
+        super().setEnabled(enabled)
+        self.line_edit.setEnabled(enabled)
+        self.toggle_btn.setEnabled(enabled)
 
     @property
     def textChanged(self):
         return self.line_edit.textChanged
+
+    @property
+    def returnPressed(self):
+        return self.line_edit.returnPressed
+
