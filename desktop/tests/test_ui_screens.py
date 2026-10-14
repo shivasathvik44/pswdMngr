@@ -269,3 +269,155 @@ def test_passphrase_strength_widget_entropy_guidance(qapp):
     assert "Heuristic" in widget.label.text()
     assert "Diceware" in widget.advice_label.text() or "offline" in widget.advice_label.text().lower()
 
+
+def test_vault_screen_new_item_creation_and_save_success(qapp, mock_session):
+    """Regression test: Creating and saving a new item does not raise ValidationError
+    and shows success banner while synchronizing item_list selection."""
+    mock_session.is_unlocked = True
+    screen = VaultScreen(mock_session)
+    screen.show()
+
+    # Click new item
+    screen._on_new_item_clicked()
+    assert screen.current_item_id is None
+    assert screen.title_input.text() == "New Item"
+    assert screen.editor_widget.isVisible()
+
+    # Fill fields
+    screen.title_input.setText("ProtonMail")
+    screen.username_input.setText("user@proton.me")
+    screen.password_input.setText("VerySecretPassword2026!")
+    screen.url_input.setText("https://mail.proton.me")
+    screen.notes_input.setPlainText("Encrypted email service")
+
+    # Save item without exception
+    screen._on_save_clicked()
+    # Button enters saving state
+    assert screen.save_btn.text() == "Encrypting & Saving..."
+    assert not screen.save_btn.isEnabled()
+
+    # Simulate save success
+    saved_item = VaultItem(
+        title="ProtonMail",
+        username="user@proton.me",
+        password="VerySecretPassword2026!",
+        url="https://mail.proton.me",
+        notes="Encrypted email service",
+    )
+    mock_session.items[saved_item.id] = saved_item
+    screen._on_save_success(saved_item)
+
+    # Verification:
+    # 1. Success banner is visible with confirmation message
+    assert not screen.banner_label.isHidden()
+    assert "Entry encrypted and saved successfully" in screen.banner_label.text()
+    # 2. current_item_id matches saved item ID
+    assert screen.current_item_id == saved_item.id
+    # 3. Item appears in list and is selected
+    assert screen.item_list.count() == 1
+    assert "ProtonMail" in screen.item_list.item(0).text()
+    assert screen.item_list.currentItem() is not None
+    assert screen.item_list.currentItem().data(Qt.ItemDataRole.UserRole) == saved_item.id
+
+
+def test_vault_screen_validation_error_handling(qapp, mock_session):
+    """Verify validation errors are caught, displayed in banner, and do not leak secrets."""
+    mock_session.is_unlocked = True
+    screen = VaultScreen(mock_session)
+    screen.show()
+    screen._on_new_item_clicked()
+
+    # 1. Empty title validation
+    screen.title_input.setText("")
+    screen._on_save_clicked()
+    assert not screen.banner_label.isHidden()
+    assert "Title cannot be empty" in screen.banner_label.text()
+
+    # 2. Field constraint violation (> 256 chars title)
+    screen.title_input.setText("A" * 257)
+    screen.password_input.setText("SecretPassword123!")
+    screen._on_save_clicked()
+    assert not screen.banner_label.isHidden()
+    assert "Validation error" in screen.banner_label.text()
+    # Ensure sensitive password text is NOT in banner
+    assert "SecretPassword123!" not in screen.banner_label.text()
+
+
+def test_vault_screen_cancel_reverts_state(qapp, mock_session):
+    """Verify Cancel button reverts new item form or uncommitted edits on existing item."""
+    mock_session.is_unlocked = True
+    item = VaultItem(title="Bitbucket", username="dev", password="OriginalPassword1!")
+    mock_session.items[item.id] = item
+
+    screen = VaultScreen(mock_session)
+    screen.show()
+    screen.reload_items()
+
+    # 1. Cancel during new item creation reverts to placeholder
+    screen._on_new_item_clicked()
+    assert screen.editor_widget.isVisible()
+    screen._on_cancel_clicked()
+    assert screen.editor_widget.isHidden()
+    assert screen.placeholder_widget.isVisible()
+
+    # 2. Cancel during existing item edit reverts modified fields
+    screen._load_item_into_editor(item)
+    screen.title_input.setText("Modified Title Not Saved")
+    screen.password_input.setText("ModifiedPasswordNotSaved")
+    screen._on_cancel_clicked()
+    assert screen.title_input.text() == "Bitbucket"
+    assert screen.password_input.text() == "OriginalPassword1!"
+
+
+def test_vault_screen_search_preserves_selected_item(qapp, mock_session):
+    """Verify that searching preserves current editor item if it matches query."""
+    mock_session.is_unlocked = True
+    item1 = VaultItem(title="GitHub", username="octocat")
+    item2 = VaultItem(title="GitLab", username="gitlabber")
+    item3 = VaultItem(title="Slack", username="chatuser")
+    mock_session.items[item1.id] = item1
+    mock_session.items[item2.id] = item2
+    mock_session.items[item3.id] = item3
+
+    screen = VaultScreen(mock_session)
+    screen.show()
+    screen.reload_items()
+
+    # Select GitHub
+    screen._load_item_into_editor(item1)
+    assert screen.current_item_id == item1.id
+    assert screen.editor_widget.isVisible()
+
+    # Search "git" -> item1 matches, stays selected and editor stays visible
+    screen.search_input.setText("git")
+    assert screen.item_list.count() == 2
+    assert screen.current_item_id == item1.id
+    assert screen.editor_widget.isVisible()
+
+    # Search "slack" -> item1 does not match, reverts to placeholder
+    screen.search_input.setText("slack")
+    assert screen.item_list.count() == 1
+    assert screen.placeholder_widget.isVisible()
+
+
+def test_vault_screen_clipboard_cleared_on_lock(qapp, mock_session):
+    """Verify that locking the vault immediately clears any copied secrets from the clipboard."""
+    mock_session.is_unlocked = True
+    screen = VaultScreen(mock_session)
+    screen.show()
+
+    secret = "CopiedSecretVaultPassword123!"
+    screen._copy_to_clipboard(secret, "Password")
+    clipboard = QApplication.clipboard()
+    assert clipboard.text() == secret
+    assert screen.last_copied_text == secret
+
+    # Vault locks
+    screen.clear_vault_ui()
+    assert clipboard.text() == ""
+    assert screen.last_copied_text is None
+
+
+
+
+

@@ -489,3 +489,165 @@ async def test_legacy_account_migration_403_handling(make_session):
 
     assert exc_info.value.status_code == 403
     assert "migration" in str(exc_info.value).lower()
+
+
+# ============================================================================
+# 6. Full Lifecycle, App Restart Persistence, and Data Integrity
+# ============================================================================
+
+
+@pytest.mark.anyio
+async def test_real_backend_full_vault_lifecycle_save_fetch_decrypt_edit_fetch_delete_sync(make_session):
+    """Test full cycle: save -> fetch -> decrypt -> edit -> fetch -> delete -> sync against real backend."""
+    client_session, db_factory = make_session("lifecycle_user")
+
+    await client_session.register_account(
+        username="lifecycle_user",
+        account_password="LifecycleAccountPassword2026!",
+        vault_master_password="Correct-Horse-Battery-Staple-Lifecycle-2026",
+    )
+    await client_session.login_account("lifecycle_user", "LifecycleAccountPassword2026!")
+    await client_session.unlock_vault("Correct-Horse-Battery-Staple-Lifecycle-2026")
+
+    # 1. Save new item
+    item = VaultItem(
+        title="Banking Portal",
+        username="life_user",
+        password="TopSecretBankPassword999!",
+        url="https://bank.example.com",
+        notes="Primary checking account",
+    )
+    saved = await client_session.save_item(item)
+    assert saved.id == item.id
+    assert saved.revision == 1
+
+    # Verify backend has only ciphertext envelope
+    with db_factory() as db:
+        rec = db.query(EncryptedRecord).filter_by(record_id=item.id).one()
+        assert rec.is_deleted is False
+        assert rec.revision == 1
+        assert "TopSecretBankPassword999!" not in rec.ciphertext_payload
+        assert "Banking Portal" not in rec.ciphertext_payload
+
+    # 2. Fetch record by ID
+    fetched = await client_session.fetch_record(item.id)
+    assert fetched is not None
+    assert fetched.id == item.id
+    assert fetched.title == "Banking Portal"
+    assert fetched.password == "TopSecretBankPassword999!"
+    assert fetched.url == "https://bank.example.com"
+    assert fetched.notes == "Primary checking account"
+
+    # 3. Edit item
+    fetched.title = "Banking Portal (Updated)"
+    fetched.password = "NewRotatedBankPassword123!"
+    fetched.notes = "Updated notes after pin change"
+    updated = await client_session.save_item(fetched)
+    assert updated.id == item.id
+    assert updated.revision == 2
+
+    # 4. Fetch again and verify update
+    fetched2 = await client_session.fetch_record(item.id)
+    assert fetched2 is not None
+    assert fetched2.title == "Banking Portal (Updated)"
+    assert fetched2.password == "NewRotatedBankPassword123!"
+    assert fetched2.notes == "Updated notes after pin change"
+    assert fetched2.revision == 2
+
+    # 5. Delete item (tombstone)
+    await client_session.delete_item(item.id)
+    assert item.id not in client_session.items
+
+    with db_factory() as db:
+        rec_del = db.query(EncryptedRecord).filter_by(record_id=item.id).one()
+        assert rec_del.is_deleted is True
+        assert rec_del.ciphertext_payload == ""
+        assert rec_del.revision == 3
+
+    # 6. Fetch deleted item returns None
+    assert await client_session.fetch_record(item.id) is None
+
+
+@pytest.mark.anyio
+async def test_real_backend_persistence_across_app_restart(make_session):
+    """Verify records persist across client shutdown and can be retrieved after restart and unlock."""
+    session1, db_factory = make_session("restart_user")
+
+    await session1.register_account(
+        username="restart_user",
+        account_password="RestartUserPassword2026!",
+        vault_master_password="Correct-Horse-Battery-Staple-Restart-2026",
+    )
+    await session1.login_account("restart_user", "RestartUserPassword2026!")
+    await session1.unlock_vault("Correct-Horse-Battery-Staple-Restart-2026")
+
+    # Create 2 items
+    item1 = VaultItem(title="Bitwarden", username="bw_user", password="BWPassword1!", url="https://bw.com")
+    item2 = VaultItem(title="KeePass", username="kp_user", password="KPPassword2!", url="https://kp.com")
+    await session1.save_item(item1)
+    await session1.save_item(item2)
+
+    # Simulate client application shutdown
+    session1.lock()
+    del session1
+
+    # Simulate fresh client launch (new VaultSession connecting to same server DB)
+    session2, _ = make_session("restart_user")
+
+    # Step 1: Login with account password (still locked)
+    login_info = await session2.login_account("restart_user", "RestartUserPassword2026!")
+    assert login_info["has_vault_key"] is True
+    assert session2.is_authenticated is True
+    assert session2.is_unlocked is False
+    assert len(session2.items) == 0
+
+    # Step 2: Unlock with master password (triggers initial sync)
+    await session2.unlock_vault("Correct-Horse-Battery-Staple-Restart-2026")
+    assert session2.is_unlocked is True
+    assert len(session2.items) == 2
+
+    # Step 3: Verify decrypted items
+    assert item1.id in session2.items
+    assert item2.id in session2.items
+    assert session2.items[item1.id].title == "Bitwarden"
+    assert session2.items[item1.id].password == "BWPassword1!"
+    assert session2.items[item2.id].title == "KeePass"
+    assert session2.items[item2.id].password == "KPPassword2!"
+
+
+@pytest.mark.anyio
+async def test_real_backend_corrupted_ciphertext_gracefully_handled(make_session):
+    """Verify that a corrupted ciphertext record is skipped during sync without corrupting valid records."""
+    client_session, db_factory = make_session("corrupt_test_user")
+
+    await client_session.register_account(
+        username="corrupt_test_user",
+        account_password="CorruptAccountPassword2026!",
+        vault_master_password="Corrupt-Secret-Master-Passphrase-2026",
+    )
+    await client_session.login_account("corrupt_test_user", "CorruptAccountPassword2026!")
+    await client_session.unlock_vault("Corrupt-Secret-Master-Passphrase-2026")
+
+    # Save 2 items
+    item_valid = VaultItem(title="Valid Service", password="ValidSecretPassword123!")
+    item_corrupt = VaultItem(title="Corrupt Service", password="CorruptSecretPassword456!")
+    await client_session.save_item(item_valid)
+    await client_session.save_item(item_corrupt)
+
+    # Tamper with item_corrupt in database directly
+    with db_factory() as db:
+        rec = db.query(EncryptedRecord).filter_by(record_id=item_corrupt.id).one()
+        # Tamper payload with invalid Base64 or corrupted envelope
+        rec.ciphertext_payload = '{"version":1,"algorithm":"AES-256-GCM","record_id":"' + item_corrupt.id + '","nonce":"Hh8gISIjJCUmJygp","ciphertext":"dGFtcGVyZWQ="}'
+        db.commit()
+
+    # Clear local items and re-sync
+    client_session.items.clear()
+    client_session.sync_cursor = 0
+    await client_session.sync_records()
+
+    # Valid item is decrypted successfully, corrupted item is safely skipped
+    assert item_valid.id in client_session.items
+    assert client_session.items[item_valid.id].password == "ValidSecretPassword123!"
+    assert item_corrupt.id not in client_session.items
+

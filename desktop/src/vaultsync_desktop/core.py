@@ -9,6 +9,7 @@ import time
 from typing import Callable, Optional
 
 from vaultsync_server.crypto.envelope import EncryptedRecordEnvelope
+from vaultsync_server.crypto.errors import CryptoError
 from vaultsync_server.crypto.records import decrypt_record, encrypt_record
 from vaultsync_server.crypto.vault_keys import VaultKey
 
@@ -18,6 +19,7 @@ from vaultsync_desktop.api_client import (
     AuthenticationError,
     ConflictError,
     MigrationRequiredError,
+    NotFoundError,
 )
 from vaultsync_desktop.crypto import (
     clear_key_material,
@@ -199,13 +201,81 @@ class VaultSession:
     # ------------------------------------------------------------------------
 
     async def sync_records(self) -> None:
-        """Fetch remote record changes and decrypt into local in-memory store."""
+        """Fetch remote record changes and decrypt into local in-memory store.
+
+        Supports pagination if the server has more items than the page limit.
+        """
         if not self.is_unlocked or not self._vault_key:
             raise ApiError("Vault must be unlocked to synchronize records.")
 
         gen = self.lock_generation
+        while True:
+            try:
+                sync_data = await self.api.fetch_sync(since_cursor=self.sync_cursor, limit=100)
+            except AuthenticationError:
+                self.lock()
+                self.session_token = None
+                if self.username:
+                    self.storage.delete_session_token(self.username)
+                raise
+
+            if not self.is_unlocked or self.lock_generation != gen or not self._vault_key:
+                logger.info("Sync aborted: vault locked while fetching updates.")
+                return
+
+            items = sync_data.get("items", [])
+            next_cursor = sync_data.get("next_cursor", self.sync_cursor)
+            has_more = sync_data.get("has_more", False)
+
+            for rec in items:
+                if not self.is_unlocked or self.lock_generation != gen or not self._vault_key:
+                    logger.info("Sync iteration stopped: vault locked.")
+                    return
+
+                record_id = rec.get("record_id")
+                if not record_id:
+                    continue
+                is_deleted = rec.get("is_deleted", False)
+                revision = rec.get("revision", 1)
+
+                if is_deleted:
+                    self.items.pop(record_id, None)
+                else:
+                    ciphertext_payload = rec.get("ciphertext_payload", "")
+                    if ciphertext_payload:
+                        try:
+                            env = EncryptedRecordEnvelope.from_json(ciphertext_payload)
+                            if env.record_id != record_id:
+                                logger.error("Envelope record_id %s mismatch with response %s", env.record_id, record_id)
+                                continue
+                            decrypted_bytes = decrypt_record(self._vault_key, env)
+                            vault_item = VaultItem.from_secret_json(
+                                record_id=record_id,
+                                revision=revision,
+                                secret_json=decrypted_bytes.decode("utf-8"),
+                            )
+                            self.items[record_id] = vault_item
+                        except Exception as exc:
+                            logger.error("Failed to decrypt record %s: %s", record_id, exc)
+
+            if not self.is_unlocked or self.lock_generation != gen:
+                return
+            self.sync_cursor = next_cursor
+
+            if not has_more or not items:
+                break
+
+    async def fetch_record(self, record_id: str) -> Optional[VaultItem]:
+        """Fetch and decrypt an individual record by record_id from the server."""
+        if not self.is_unlocked or not self._vault_key:
+            raise ApiError("Vault must be unlocked to fetch records.")
+
+        gen = self.lock_generation
         try:
-            sync_data = await self.api.fetch_sync(since_cursor=self.sync_cursor, limit=100)
+            data = await self.api.get_record(record_id)
+        except NotFoundError:
+            self.items.pop(record_id, None)
+            return None
         except AuthenticationError:
             self.lock()
             self.session_token = None
@@ -214,44 +284,26 @@ class VaultSession:
             raise
 
         if not self.is_unlocked or self.lock_generation != gen or not self._vault_key:
-            logger.info("Sync aborted: vault locked while fetching updates.")
-            return
+            return None
 
-        items = sync_data.get("items", [])
-        next_cursor = sync_data.get("next_cursor", self.sync_cursor)
+        if data.get("is_deleted", False):
+            self.items.pop(record_id, None)
+            return None
 
-        for rec in items:
-            if not self.is_unlocked or self.lock_generation != gen or not self._vault_key:
-                logger.info("Sync iteration stopped: vault locked.")
-                return
-
-            record_id = rec.get("record_id")
-            is_deleted = rec.get("is_deleted", False)
-            revision = rec.get("revision", 1)
-
-            if is_deleted:
-                self.items.pop(record_id, None)
-            else:
-                ciphertext_payload = rec.get("ciphertext_payload", "")
-                if ciphertext_payload:
-                    try:
-                        env = EncryptedRecordEnvelope.from_json(ciphertext_payload)
-                        if env.record_id != record_id:
-                            logger.error("Envelope record_id %s mismatch with response %s", env.record_id, record_id)
-                            continue
-                        decrypted_bytes = decrypt_record(self._vault_key, env)
-                        vault_item = VaultItem.from_secret_json(
-                            record_id=record_id,
-                            revision=revision,
-                            secret_json=decrypted_bytes.decode("utf-8"),
-                        )
-                        self.items[record_id] = vault_item
-                    except Exception as exc:
-                        logger.error("Failed to decrypt record %s: %s", record_id, exc)
-
-        if not self.is_unlocked or self.lock_generation != gen:
-            return
-        self.sync_cursor = next_cursor
+        ciphertext_payload = data.get("ciphertext_payload", "")
+        if ciphertext_payload:
+            env = EncryptedRecordEnvelope.from_json(ciphertext_payload)
+            if env.record_id != record_id:
+                raise CryptoError(f"Envelope record_id mismatch: {env.record_id} != {record_id}")
+            decrypted_bytes = decrypt_record(self._vault_key, env)
+            vault_item = VaultItem.from_secret_json(
+                record_id=record_id,
+                revision=data.get("revision", 1),
+                secret_json=decrypted_bytes.decode("utf-8"),
+            )
+            self.items[record_id] = vault_item
+            return vault_item
+        return None
 
     async def save_item(self, item: VaultItem) -> VaultItem:
         """Client-encrypt record contents and upload to backend."""
@@ -276,6 +328,10 @@ class VaultSession:
                     ciphertext_payload=ciphertext_json,
                 )
                 item.revision = res.get("revision", item.revision + 1)
+            if "updated_at" in res:
+                item.updated_at = str(res["updated_at"])
+            if "created_at" in res and not item.created_at:
+                item.created_at = str(res["created_at"])
         except AuthenticationError:
             self.lock()
             self.session_token = None
@@ -303,6 +359,8 @@ class VaultSession:
 
         try:
             await self.api.delete_record(record_id=item_id, expected_revision=item.revision)
+        except NotFoundError:
+            logger.info("Record %s already deleted or not found on server.", item_id)
         except AuthenticationError:
             self.lock()
             self.session_token = None

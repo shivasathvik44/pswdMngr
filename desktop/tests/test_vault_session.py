@@ -261,3 +261,172 @@ def test_inactivity_auto_lock(mock_session_env):
     assert session.check_inactivity() is True
     assert session.is_unlocked is False
     assert session._vault_key is None
+
+
+@pytest.mark.anyio
+async def test_sync_records_pagination(mock_session_env, monkeypatch):
+    """Verify that sync_records loops through all available pages when has_more=True."""
+    session = mock_session_env
+    master_pwd = "MasterPassword2026!"
+    vek, salt_b64, wrapped_env_json = create_initial_vault_key_and_envelope(
+        master_pwd, memory_cost=16384, time_cost=1, parallelism=2
+    )
+
+    # Generate 150 encrypted items
+    items_page1 = []
+    for i in range(100):
+        rid = f"rec-page1-{i}"
+        item = VaultItem(id=rid, title=f"Title 1-{i}")
+        env = encrypt_record(vek, rid, item.to_secret_json())
+        items_page1.append({
+            "record_id": rid,
+            "ciphertext_payload": env.to_json(),
+            "revision": 1,
+            "sync_cursor": i + 1,
+            "is_deleted": False,
+        })
+
+    items_page2 = []
+    for i in range(50):
+        rid = f"rec-page2-{i}"
+        item = VaultItem(id=rid, title=f"Title 2-{i}")
+        env = encrypt_record(vek, rid, item.to_secret_json())
+        items_page2.append({
+            "record_id": rid,
+            "ciphertext_payload": env.to_json(),
+            "revision": 1,
+            "sync_cursor": 100 + i + 1,
+            "is_deleted": False,
+        })
+
+    class MockPaginationTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path == "/api/v1/auth/login":
+                return httpx.Response(200, json={"session_token": "t1", "kdf_salt": salt_b64, "wrapped_vault_key": wrapped_env_json})
+            elif path == "/api/v1/sync":
+                since_cursor = int(request.url.params.get("since_cursor", 0))
+                if since_cursor < 100:
+                    return httpx.Response(200, json={
+                        "items": items_page1,
+                        "next_cursor": 100,
+                        "server_cursor": 150,
+                        "has_more": True,
+                    })
+                else:
+                    return httpx.Response(200, json={
+                        "items": items_page2,
+                        "next_cursor": 150,
+                        "server_cursor": 150,
+                        "has_more": False,
+                    })
+            return httpx.Response(404)
+
+    orig_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: orig_client(*args, transport=MockPaginationTransport(), **{k: v for k, v in kwargs.items() if k != "transport"}),
+    )
+
+    await session.login_account("alice", "AccountPassword123!")
+    await session.unlock_vault(master_pwd)
+
+    # Sync records -> should fetch both page 1 and page 2 (total 150 items)
+    await session.sync_records()
+    assert len(session.items) == 150
+    assert "rec-page1-0" in session.items
+    assert "rec-page2-49" in session.items
+    assert session.sync_cursor == 150
+
+
+@pytest.mark.anyio
+async def test_fetch_record_by_id(mock_session_env, monkeypatch):
+    """Verify that fetch_record retrieves, decrypts, and caches an individual item by ID."""
+    session = mock_session_env
+    master_pwd = "MasterPassword2026!"
+    vek, salt_b64, wrapped_env_json = create_initial_vault_key_and_envelope(
+        master_pwd, memory_cost=16384, time_cost=1, parallelism=2
+    )
+
+    rec_id = "target-single-rec-id"
+    item = VaultItem(id=rec_id, title="Single Item", username="admin")
+    env = encrypt_record(vek, rec_id, item.to_secret_json())
+
+    class MockSingleRecTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path == "/api/v1/auth/login":
+                return httpx.Response(200, json={"session_token": "t1", "kdf_salt": salt_b64, "wrapped_vault_key": wrapped_env_json})
+            elif path == "/api/v1/sync":
+                return httpx.Response(200, json={"items": [], "next_cursor": 0, "server_cursor": 0, "has_more": False})
+            elif path == f"/api/v1/records/{rec_id}":
+                return httpx.Response(200, json={
+                    "record_id": rec_id,
+                    "ciphertext_payload": env.to_json(),
+                    "revision": 3,
+                    "sync_cursor": 1,
+                    "is_deleted": False,
+                })
+            elif path == "/api/v1/records/missing-id":
+                return httpx.Response(404, json={"detail": "Record not found"})
+            return httpx.Response(404)
+
+    orig_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: orig_client(*args, transport=MockSingleRecTransport(), **{k: v for k, v in kwargs.items() if k != "transport"}),
+    )
+
+    await session.login_account("alice", "AccountPassword123!")
+    await session.unlock_vault(master_pwd)
+
+    # 1. Fetch existing item
+    fetched = await session.fetch_record(rec_id)
+    assert fetched is not None
+    assert fetched.id == rec_id
+    assert fetched.title == "Single Item"
+    assert fetched.username == "admin"
+    assert fetched.revision == 3
+    assert rec_id in session.items
+
+    # 2. Fetch missing item -> returns None
+    missing = await session.fetch_record("missing-id")
+    assert missing is None
+
+
+@pytest.mark.anyio
+async def test_delete_item_handles_not_found(mock_session_env, monkeypatch):
+    """Verify deleting a record that 404s on server removes it from session.items cleanly."""
+    session = mock_session_env
+    master_pwd = "MasterPassword2026!"
+    _, salt_b64, wrapped_env_json = create_initial_vault_key_and_envelope(
+        master_pwd, memory_cost=16384, time_cost=1, parallelism=2
+    )
+
+    class MockDeleteTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path == "/api/v1/auth/login":
+                return httpx.Response(200, json={"session_token": "t1", "kdf_salt": salt_b64, "wrapped_vault_key": wrapped_env_json})
+            elif path == "/api/v1/sync":
+                return httpx.Response(200, json={"items": [], "next_cursor": 0, "server_cursor": 0, "has_more": False})
+            elif path.startswith("/api/v1/records/") and request.method == "DELETE":
+                return httpx.Response(404, json={"detail": "Record not found"})
+            return httpx.Response(404)
+
+    orig_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: orig_client(*args, transport=MockDeleteTransport(), **{k: v for k, v in kwargs.items() if k != "transport"}),
+    )
+
+    await session.login_account("alice", "AccountPassword123!")
+    await session.unlock_vault(master_pwd)
+
+    item = VaultItem(title="To Delete")
+    session.items[item.id] = item
+
+    # Delete should succeed and remove item from session.items
+    await session.delete_item(item.id)
+    assert item.id not in session.items
+

@@ -1,16 +1,26 @@
 """VaultSync Desktop data models."""
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class VaultItem(BaseModel):
     """Plaintext representation of an encrypted vault entry stored in memory only when unlocked."""
 
     id: str = Field(default_factory=lambda: str(uuid4()))
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def validate_id(cls, v: Any) -> str:
+        """Ensure record ID defaults to a generated UUID4 if None, empty, or whitespace."""
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return str(uuid4())
+        if not isinstance(v, str):
+            return str(v)
+        return v.strip()
     title: str = Field(..., min_length=1, max_length=256)
     username: str = Field(default="", max_length=256)
     password: str = Field(default="", max_length=1024)
@@ -46,7 +56,7 @@ class VaultItem(BaseModel):
         data = json.loads(secret_json)
         return cls(
             id=record_id,
-            title=data.get("title", "Untitled"),
+            title=data.get("title") or "Untitled",
             username=data.get("username", ""),
             password=data.get("password", ""),
             url=data.get("url", ""),

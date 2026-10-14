@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from pydantic import ValidationError
+
 from vaultsync_desktop.api_client import ConflictError
 from vaultsync_desktop.async_bridge import run_async
 from vaultsync_desktop.core import VaultSession
@@ -36,6 +38,7 @@ class VaultScreen(QWidget):
         super().__init__(parent)
         self.session = session
         self.current_item_id: Optional[str] = None
+        self.last_copied_text: Optional[str] = None
         self.session.add_lock_callback(self.clear_vault_ui)
         self._init_ui()
 
@@ -179,11 +182,16 @@ class VaultScreen(QWidget):
         self.save_btn.setProperty("class", "primary")
         self.save_btn.clicked.connect(self._on_save_clicked)
 
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setProperty("class", "secondary")
+        self.cancel_btn.clicked.connect(self._on_cancel_clicked)
+
         self.delete_btn = QPushButton("Delete")
         self.delete_btn.setProperty("class", "danger")
         self.delete_btn.clicked.connect(self._on_delete_clicked)
 
         action_row.addWidget(self.save_btn)
+        action_row.addWidget(self.cancel_btn)
         action_row.addWidget(self.delete_btn)
         action_row.addStretch()
         editor_layout.addLayout(action_row)
@@ -203,9 +211,12 @@ class VaultScreen(QWidget):
 
     def reload_items(self) -> None:
         """Populate list from in-memory session items."""
+        current_id = self.current_item_id
+        self.item_list.blockSignals(True)
         self.item_list.clear()
         query = self.search_input.text().strip().lower()
 
+        matching_item = None
         for item_id, item in self.session.items.items():
             if item.is_deleted:
                 continue
@@ -218,6 +229,16 @@ class VaultScreen(QWidget):
             list_item.setText(f"{display_title}{display_user}")
             list_item.setData(Qt.ItemDataRole.UserRole, item_id)
             self.item_list.addItem(list_item)
+            if item_id == current_id:
+                matching_item = list_item
+
+        if matching_item:
+            matching_item.setSelected(True)
+            self.item_list.setCurrentItem(matching_item)
+        elif current_id is not None:
+            self._show_placeholder()
+
+        self.item_list.blockSignals(False)
 
         # Update sync badge
         count = len([i for i in self.session.items.values() if not i.is_deleted])
@@ -241,6 +262,11 @@ class VaultScreen(QWidget):
     def clear_vault_ui(self) -> None:
         """Immediately clear all sensitive decrypted fields, search queries, and lists upon vault lock."""
         self.current_item_id = None
+        if self.last_copied_text:
+            clipboard = QApplication.clipboard()
+            if clipboard.text() == self.last_copied_text:
+                clipboard.clear()
+            self.last_copied_text = None
         self.search_input.clear()
         self.item_list.clear()
         self.title_input.clear()
@@ -268,12 +294,31 @@ class VaultScreen(QWidget):
         self.password_input.setText(item.password)
         self.url_input.setText(item.url)
         self.notes_input.setPlainText(item.notes)
-        self.meta_label.setText(f"Revision {item.revision} • Updated {item.updated_at[:19]}")
+        updated_str = (item.updated_at or "")[:19]
+        self.meta_label.setText(f"Revision {item.revision} • Updated {updated_str}")
 
         self.delete_btn.show()
         self.banner_label.hide()
         self.placeholder_widget.hide()
         self.editor_widget.show()
+
+        # Synchronize list selection without triggering duplicate callbacks
+        self.item_list.blockSignals(True)
+        for i in range(self.item_list.count()):
+            list_item = self.item_list.item(i)
+            if list_item.data(Qt.ItemDataRole.UserRole) == item.id:
+                list_item.setSelected(True)
+                self.item_list.setCurrentItem(list_item)
+                break
+        self.item_list.blockSignals(False)
+
+    def _on_cancel_clicked(self) -> None:
+        if not self.session.is_unlocked:
+            return
+        if self.current_item_id and self.current_item_id in self.session.items:
+            self._load_item_into_editor(self.session.items[self.current_item_id])
+        else:
+            self._show_placeholder()
 
     def _on_new_item_clicked(self) -> None:
         self.item_list.clearSelection()
@@ -296,6 +341,9 @@ class VaultScreen(QWidget):
     # ------------------------------------------------------------------------
 
     def _on_save_clicked(self) -> None:
+        if not self.session.is_unlocked:
+            return
+
         title = self.title_input.text().strip()
         if not title:
             self._show_banner("Title cannot be empty.", is_error=True)
@@ -304,15 +352,28 @@ class VaultScreen(QWidget):
         item_id = self.current_item_id
         existing = self.session.items.get(item_id) if item_id else None
 
-        item = VaultItem(
-            id=item_id or VaultItem().id,
-            title=title,
-            username=self.username_input.text().strip(),
-            password=self.password_input.text(),
-            url=self.url_input.text().strip(),
-            notes=self.notes_input.toPlainText(),
-            revision=existing.revision if existing else 1,
-        )
+        item_kwargs = {
+            "title": title,
+            "username": self.username_input.text().strip(),
+            "password": self.password_input.text(),
+            "url": self.url_input.text().strip(),
+            "notes": self.notes_input.toPlainText(),
+            "revision": existing.revision if existing else 1,
+        }
+        if item_id:
+            item_kwargs["id"] = item_id
+            if existing:
+                item_kwargs["created_at"] = existing.created_at
+
+        try:
+            item = VaultItem(**item_kwargs)
+        except ValidationError as exc:
+            messages = [f"{err.get('loc', ('field',))[-1]}: {err.get('msg', 'invalid')}" for err in exc.errors()]
+            self._show_banner(f"Validation error: {'; '.join(messages)}", is_error=True)
+            return
+        except Exception as exc:
+            self._show_banner(f"Validation error: {exc}", is_error=True)
+            return
 
         self.save_btn.setEnabled(False)
         self.save_btn.setText("Encrypting & Saving...")
@@ -327,9 +388,9 @@ class VaultScreen(QWidget):
     def _on_save_success(self, saved: VaultItem) -> None:
         if not self.session.is_unlocked:
             return
-        self._show_banner("✓ Entry encrypted and saved successfully.", is_error=False)
         self.reload_items()
         self._load_item_into_editor(saved)
+        self._show_banner("✓ Entry encrypted and saved successfully.", is_error=False)
 
     def _on_save_error(self, exc: Exception) -> None:
         if not self.session.is_unlocked:
@@ -391,6 +452,7 @@ class VaultScreen(QWidget):
 
         clipboard = QApplication.clipboard()
         clipboard.setText(text)
+        self.last_copied_text = text
         clear_seconds = self.session.config.clipboard_clear_seconds
 
         self._show_banner(
@@ -403,7 +465,9 @@ class VaultScreen(QWidget):
             current_clip = QApplication.clipboard().text()
             if current_clip == text:
                 QApplication.clipboard().clear()
-                self._show_banner("🔒 Clipboard cleared for security.", is_error=False)
+                self.last_copied_text = None
+                if self.session.is_unlocked:
+                    self._show_banner("🔒 Clipboard cleared for security.", is_error=False)
 
         QTimer.singleShot(clear_seconds * 1000, clear_if_matches)
 
