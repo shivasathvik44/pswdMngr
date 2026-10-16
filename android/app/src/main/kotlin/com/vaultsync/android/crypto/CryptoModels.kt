@@ -16,6 +16,8 @@ class UnsupportedAlgorithmException(message: String = "Unsupported cipher or KDF
 
 class InvalidParameterException(message: String = "Invalid cryptographic parameter bounds", cause: Throwable? = null) : CryptoException(message, cause)
 
+class SecureStorageException(message: String = "Secure Keystore storage failure", cause: Throwable? = null) : CryptoException(message, cause)
+
 /**
  * Parameters for the Argon2id Key Derivation Function.
  */

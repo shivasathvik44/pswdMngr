@@ -11,6 +11,7 @@ import com.vaultsync.android.api.UpdateRecordRequest
 import com.vaultsync.android.api.UpdateVaultKeyRequest
 import com.vaultsync.android.crypto.KeyStoreManager
 import com.vaultsync.android.crypto.RecordEnvelope
+import com.vaultsync.android.crypto.SecureStorageException
 import com.vaultsync.android.crypto.VaultCrypto
 import com.vaultsync.android.crypto.WrappedKeyEnvelope
 import com.vaultsync.android.model.SessionState
@@ -91,16 +92,25 @@ class VaultRepository(
     val sessionState: StateFlow<SessionState> = _sessionState.asStateFlow()
 
     init {
-        val storedToken = keyStoreManager.getSessionToken()
-        if (!storedToken.isNullOrBlank()) {
-            api.sessionToken = storedToken
-            username = keyStoreManager.lastUsername
-            _sessionState.update {
-                it.copy(
-                    username = username,
-                    isAuthenticated = true
-                )
+        try {
+            val storedToken = keyStoreManager.getSessionToken()
+            if (!storedToken.isNullOrBlank()) {
+                api.sessionToken = storedToken
+                username = keyStoreManager.lastUsername
+                _sessionState.update {
+                    it.copy(
+                        username = username,
+                        isAuthenticated = true
+                    )
+                }
             }
+        } catch (_: SecureStorageException) {
+            // Corrupted or invalidated Keystore token: fail closed into clean unauthenticated state
+            try {
+                keyStoreManager.clearSessionToken()
+            } catch (_: Exception) {
+            }
+            api.sessionToken = null
         }
     }
 
@@ -262,7 +272,11 @@ class VaultRepository(
         }
         lock()
         api.sessionToken = null
-        keyStoreManager.clearSessionToken()
+        try {
+            keyStoreManager.clearSessionToken()
+        } catch (_: Exception) {
+            // Best effort clear
+        }
         _sessionState.update {
             it.copy(
                 isAuthenticated = false,
@@ -288,7 +302,11 @@ class VaultRepository(
         } catch (_: Exception) {
             // Best effort network revocation
         } finally {
-            keyStoreManager.clearSessionToken()
+            try {
+                keyStoreManager.clearSessionToken()
+            } catch (_: Exception) {
+                // Best effort clear
+            }
             api.sessionToken = null
             username = ""
             accountId = ""
@@ -367,8 +385,29 @@ class VaultRepository(
             kdfSalt = res.kdfSalt
         }
 
-        keyStoreManager.saveSessionToken(res.sessionToken)
-        keyStoreManager.lastUsername = cleanUser
+        try {
+            keyStoreManager.saveSessionToken(res.sessionToken)
+            keyStoreManager.lastUsername = cleanUser
+        } catch (e: SecureStorageException) {
+            lock()
+            api.sessionToken = null
+            synchronized(keyLock) {
+                username = ""
+                accountId = ""
+                wrappedVaultKey = null
+                kdfSalt = null
+            }
+            _sessionState.update {
+                it.copy(
+                    isAuthenticated = false,
+                    isUnlocked = false,
+                    username = "",
+                    accountId = "",
+                    errorMessage = "Failed to securely store session: ${e.message}"
+                )
+            }
+            throw e
+        }
 
         _sessionState.update {
             if (sessionGeneration != capturedSessionGen) return@update it

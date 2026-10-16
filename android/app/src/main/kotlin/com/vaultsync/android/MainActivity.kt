@@ -5,15 +5,12 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
-import com.vaultsync.android.api.ApiClient
-import com.vaultsync.android.crypto.KeyStoreManager
-import com.vaultsync.android.crypto.VaultCrypto
 import com.vaultsync.android.repository.VaultRepository
 import com.vaultsync.android.ui.viewmodel.AuthViewModel
 import com.vaultsync.android.ui.viewmodel.SettingsViewModel
 import com.vaultsync.android.ui.viewmodel.VaultViewModel
+import com.vaultsync.android.ui.viewmodel.VaultViewModelFactory
 
 class MainActivity : ComponentActivity() {
 
@@ -33,43 +30,13 @@ class MainActivity : ComponentActivity() {
 
         enableEdgeToEdge()
 
-        val keyStoreManager = KeyStoreManager(applicationContext)
-        val apiClient = ApiClient(baseUrl = keyStoreManager.serverUrl)
-        repository = VaultRepository(
-            api = apiClient,
-            keyStoreManager = keyStoreManager,
-            vaultCrypto = VaultCrypto
-        )
+        repository = (application as VaultSyncApplication).repository
 
-        authViewModel = ViewModelProvider(
-            this,
-            object : ViewModelProvider.Factory {
-                @Suppress("UNCHECKED_CAST")
-                override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return AuthViewModel(repository) as T
-                }
-            }
-        )[AuthViewModel::class.java]
+        val factory = VaultViewModelFactory(repository) { applicationContext }
 
-        vaultViewModel = ViewModelProvider(
-            this,
-            object : ViewModelProvider.Factory {
-                @Suppress("UNCHECKED_CAST")
-                override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return VaultViewModel(repository, applicationContext) as T
-                }
-            }
-        )[VaultViewModel::class.java]
-
-        settingsViewModel = ViewModelProvider(
-            this,
-            object : ViewModelProvider.Factory {
-                @Suppress("UNCHECKED_CAST")
-                override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return SettingsViewModel(repository) as T
-                }
-            }
-        )[SettingsViewModel::class.java]
+        authViewModel = ViewModelProvider(this, factory)[AuthViewModel::class.java]
+        vaultViewModel = ViewModelProvider(this, factory)[VaultViewModel::class.java]
+        settingsViewModel = ViewModelProvider(this, factory)[SettingsViewModel::class.java]
 
         setContent {
             VaultSyncApp(

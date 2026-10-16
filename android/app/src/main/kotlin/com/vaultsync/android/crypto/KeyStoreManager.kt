@@ -2,7 +2,7 @@ package com.vaultsync.android.crypto
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Base64
+import java.util.Base64
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -31,7 +31,7 @@ open class KeyStoreManager(private val context: Context? = null) {
 
     private val inMemoryFallback = mutableMapOf<String, Any>()
 
-    private val prefs: SharedPreferences? by lazy {
+    protected open val prefs: SharedPreferences? by lazy {
         context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
 
@@ -56,6 +56,30 @@ open class KeyStoreManager(private val context: Context? = null) {
         return entry?.secretKey ?: throw IllegalStateException("Keystore key entry could not be retrieved")
     }
 
+    protected open fun encryptToken(token: String): Pair<String, String> {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateSecretKey())
+        return Base64.getEncoder().encodeToString(cipher.doFinal(token.toByteArray(Charsets.UTF_8))) to
+            Base64.getEncoder().encodeToString(cipher.iv)
+    }
+
+    protected open fun decryptToken(encrypted: String, iv: String): String {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, getOrCreateSecretKey(),
+            GCMParameterSpec(128, Base64.getDecoder().decode(iv)))
+        return String(cipher.doFinal(Base64.getDecoder().decode(encrypted)), Charsets.UTF_8)
+    }
+
+    private fun storageFailure(message: String, cause: Exception): Nothing {
+        val failure = SecureStorageException(message, cause)
+        try {
+            clearSessionToken()
+        } catch (cleanup: Exception) {
+            failure.addSuppressed(cleanup)
+        }
+        throw failure
+    }
+
     open fun saveSessionToken(token: String) {
         val p = prefs
         if (p == null) {
@@ -63,19 +87,15 @@ open class KeyStoreManager(private val context: Context? = null) {
             return
         }
         try {
-            val key = getOrCreateSecretKey()
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, key)
-            val iv = cipher.iv
-            val encryptedBytes = cipher.doFinal(token.toByteArray(Charsets.UTF_8))
-
-            p.edit()
-                .putString(PREF_ENCRYPTED_TOKEN, Base64.encodeToString(encryptedBytes, Base64.NO_WRAP))
-                .putString(PREF_TOKEN_IV, Base64.encodeToString(iv, Base64.NO_WRAP))
-                .apply()
-        } catch (_: Exception) {
-            // Memory fallback in non-keystore environments (e.g. headless unit tests)
-            p.edit().putString(PREF_ENCRYPTED_TOKEN, token).apply()
+            val (encrypted, iv) = encryptToken(token)
+            if (!p.edit()
+                    .putString(PREF_ENCRYPTED_TOKEN, encrypted)
+                    .putString(PREF_TOKEN_IV, iv)
+                    .commit()) {
+                throw SecureStorageException("Session token persistence failed")
+            }
+        } catch (e: Exception) {
+            storageFailure("Failed to securely store session token", e)
         }
     }
 
@@ -84,20 +104,13 @@ open class KeyStoreManager(private val context: Context? = null) {
         if (p == null) {
             return inMemoryFallback[PREF_ENCRYPTED_TOKEN] as? String
         }
-        val encryptedBase64 = p.getString(PREF_ENCRYPTED_TOKEN, null) ?: return null
-        val ivBase64 = p.getString(PREF_TOKEN_IV, null) ?: return encryptedBase64
-
         return try {
-            val key = getOrCreateSecretKey()
-            val iv = Base64.decode(ivBase64, Base64.NO_WRAP)
-            val encryptedBytes = Base64.decode(encryptedBase64, Base64.NO_WRAP)
-
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
-            val decryptedBytes = cipher.doFinal(encryptedBytes)
-            String(decryptedBytes, Charsets.UTF_8)
-        } catch (_: Exception) {
-            encryptedBase64
+            val encrypted = p.getString(PREF_ENCRYPTED_TOKEN, null) ?: return null
+            val iv = p.getString(PREF_TOKEN_IV, null)
+                ?: throw SecureStorageException("Stored session token has no initialization vector")
+            decryptToken(encrypted, iv)
+        } catch (e: Exception) {
+            storageFailure("Failed to securely read session token", e)
         }
     }
 
@@ -108,10 +121,12 @@ open class KeyStoreManager(private val context: Context? = null) {
             inMemoryFallback.remove(PREF_TOKEN_IV)
             return
         }
-        p.edit()
-            .remove(PREF_ENCRYPTED_TOKEN)
-            .remove(PREF_TOKEN_IV)
-            .apply()
+        if (!p.edit()
+                .remove(PREF_ENCRYPTED_TOKEN)
+                .remove(PREF_TOKEN_IV)
+                .commit()) {
+            throw SecureStorageException("Failed to clear stored session token")
+        }
     }
 
     // ------------------------------------------------------------------------

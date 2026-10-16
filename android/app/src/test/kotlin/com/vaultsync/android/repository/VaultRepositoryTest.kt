@@ -11,6 +11,7 @@ import com.vaultsync.android.api.SyncResponse
 import com.vaultsync.android.api.UpdateRecordRequest
 import com.vaultsync.android.crypto.KeyStoreManager
 import com.vaultsync.android.crypto.RecordEnvelope
+import com.vaultsync.android.crypto.SecureStorageException
 import com.vaultsync.android.crypto.VaultCrypto
 import com.vaultsync.android.model.VaultItem
 import kotlinx.coroutines.CompletableDeferred
@@ -39,25 +40,35 @@ class VaultRepositoryTest {
         var syncResponseToReturn: SyncResponse? = null
         var syncExceptionToThrow: Exception? = null
         var syncPauseDeferred: CompletableDeferred<Unit>? = null
+        var syncStartedDeferred: CompletableDeferred<Unit>? = null
         var syncHandler: (suspend (sinceCursor: Int, limit: Int) -> SyncResponse)? = null
 
         var syncCallCount: Int = 0
         val requestedSinceCursors = mutableListOf<Int>()
 
         var createRecordPauseDeferred: CompletableDeferred<Unit>? = null
+        var createRecordStartedDeferred: CompletableDeferred<Unit>? = null
         var createRecordCallCount: Int = 0
         var createRecordResponseToReturn: RecordResponse? = null
 
         var updateRecordPauseDeferred: CompletableDeferred<Unit>? = null
+        var updateRecordStartedDeferred: CompletableDeferred<Unit>? = null
         var updateRecordCallCount: Int = 0
 
         var loginPauseDeferred: CompletableDeferred<Unit>? = null
+        var loginStartedDeferred: CompletableDeferred<Unit>? = null
         var loginCallCount: Int = 0
         var loginResponseToReturn: LoginResponse? = null
+
+        fun resetCounters() {
+            syncCallCount = 0
+            requestedSinceCursors.clear()
+        }
 
         override suspend fun fetchSync(sinceCursor: Int, limit: Int): SyncResponse {
             syncCallCount++
             requestedSinceCursors.add(sinceCursor)
+            syncStartedDeferred?.complete(Unit)
 
             syncPauseDeferred?.await()
 
@@ -75,6 +86,7 @@ class VaultRepositoryTest {
 
         override suspend fun createRecord(req: CreateRecordRequest): RecordResponse {
             createRecordCallCount++
+            createRecordStartedDeferred?.complete(Unit)
             createRecordPauseDeferred?.await()
             return createRecordResponseToReturn ?: RecordResponse(
                 recordId = req.recordId,
@@ -86,6 +98,7 @@ class VaultRepositoryTest {
 
         override suspend fun updateRecord(recordId: String, req: UpdateRecordRequest): RecordResponse {
             updateRecordCallCount++
+            updateRecordStartedDeferred?.complete(Unit)
             updateRecordPauseDeferred?.await()
             return RecordResponse(
                 recordId = recordId,
@@ -97,6 +110,7 @@ class VaultRepositoryTest {
 
         override suspend fun login(req: LoginRequest): LoginResponse {
             loginCallCount++
+            loginStartedDeferred?.complete(Unit)
             loginPauseDeferred?.await()
             return loginResponseToReturn ?: LoginResponse(
                 sessionToken = "tok-${req.username}",
@@ -140,6 +154,13 @@ class VaultRepositoryTest {
         runBlocking {
             repo.unlockVault(masterPass)
         }
+
+        // unlockVault awaits its initial sync. Count only subsequent behavior under test.
+        (repo.api as? FakeControllableApiClient)?.let {
+            assertEquals(1, it.syncCallCount)
+            assertEquals(listOf(0), it.requestedSinceCursors)
+            it.resetCounters()
+        }
     }
 
     private fun getVek(repo: VaultRepository): ByteArray {
@@ -156,6 +177,16 @@ class VaultRepositoryTest {
     // ------------------------------------------------------------------------
     // Basic Repository State & Activity Tests
     // ------------------------------------------------------------------------
+
+    @Test
+    fun testUnlockFixtureSeparatesInitialSyncFromSubsequentRequests() = runBlocking {
+        unlockRepositoryDirectly(repository)
+        assertEquals(0, fakeApi.syncCallCount)
+        assertTrue(fakeApi.requestedSinceCursors.isEmpty())
+        repository.syncRecords()
+        assertEquals(1, fakeApi.syncCallCount)
+        assertEquals(listOf(0), fakeApi.requestedSinceCursors)
+    }
 
     @Test
     fun testInitialState() {
@@ -232,7 +263,9 @@ class VaultRepositoryTest {
         assertTrue(repository.sessionState.value.isUnlocked)
 
         val pauseDeferred = CompletableDeferred<Unit>()
+        val syncStarted = CompletableDeferred<Unit>()
         fakeApi.syncPauseDeferred = pauseDeferred
+        fakeApi.syncStartedDeferred = syncStarted
 
         val currentVek = getVek(repository)
         val env = createValidEnvelope(currentVek, "rec-1", "Secret Note")
@@ -249,9 +282,7 @@ class VaultRepositoryTest {
             repository.syncRecords()
         }
 
-        while (fakeApi.syncCallCount == 0) {
-            kotlinx.coroutines.delay(10)
-        }
+        syncStarted.await()
 
         repository.lock()
         assertFalse(repository.sessionState.value.isUnlocked)
@@ -269,15 +300,15 @@ class VaultRepositoryTest {
         unlockRepositoryDirectly(repository)
 
         val pauseDeferred = CompletableDeferred<Unit>()
+        val syncStarted = CompletableDeferred<Unit>()
         fakeApi.syncPauseDeferred = pauseDeferred
+        fakeApi.syncStartedDeferred = syncStarted
 
         val syncJob = launch(Dispatchers.Default) {
             repository.syncRecords()
         }
 
-        while (fakeApi.syncCallCount == 0) {
-            kotlinx.coroutines.delay(10)
-        }
+        syncStarted.await()
 
         val oldSessionGen = repository.sessionGeneration
         repository.logout()
@@ -293,7 +324,9 @@ class VaultRepositoryTest {
     @Test
     fun testSessionAResponseArrivingAfterSessionBLogsIn() = runBlocking {
         val loginAPause = CompletableDeferred<Unit>()
+        val loginAStarted = CompletableDeferred<Unit>()
         fakeApi.loginPauseDeferred = loginAPause
+        fakeApi.loginStartedDeferred = loginAStarted
 
         val loginAJob = launch(Dispatchers.Default) {
             try {
@@ -303,9 +336,7 @@ class VaultRepositoryTest {
             }
         }
 
-        while (fakeApi.loginCallCount == 0) {
-            kotlinx.coroutines.delay(10)
-        }
+        loginAStarted.await()
 
         // Session B logs in while Session A is pending
         fakeApi.loginPauseDeferred = null
@@ -329,15 +360,15 @@ class VaultRepositoryTest {
         unlockRepositoryDirectly(repository)
 
         val syncPause = CompletableDeferred<Unit>()
+        val syncStarted = CompletableDeferred<Unit>()
         fakeApi.syncPauseDeferred = syncPause
+        fakeApi.syncStartedDeferred = syncStarted
 
         val syncJob = launch(Dispatchers.Default) {
             repository.syncRecords()
         }
 
-        while (fakeApi.syncCallCount == 0) {
-            kotlinx.coroutines.delay(10)
-        }
+        syncStarted.await()
 
         // New session starts: logout then login
         repository.logout()
@@ -361,7 +392,9 @@ class VaultRepositoryTest {
         unlockRepositoryDirectly(repository)
 
         val createPause = CompletableDeferred<Unit>()
+        val createStarted = CompletableDeferred<Unit>()
         fakeApi.createRecordPauseDeferred = createPause
+        fakeApi.createRecordStartedDeferred = createStarted
 
         val itemToCreate = VaultItem(
             id = "item-new-1",
@@ -379,9 +412,7 @@ class VaultRepositoryTest {
             }
         }
 
-        while (fakeApi.createRecordCallCount == 0) {
-            kotlinx.coroutines.delay(10)
-        }
+        createStarted.await()
 
         // Lock while saveItem is in flight awaiting network response
         repository.lock()
@@ -402,15 +433,15 @@ class VaultRepositoryTest {
         unlockRepositoryDirectly(repository)
 
         val pauseDeferred = CompletableDeferred<Unit>()
+        val syncStarted = CompletableDeferred<Unit>()
         fakeApi.syncPauseDeferred = pauseDeferred
+        fakeApi.syncStartedDeferred = syncStarted
 
         val syncJob = launch(Dispatchers.Default) {
             repository.syncRecords()
         }
 
-        while (fakeApi.syncCallCount == 0) {
-            kotlinx.coroutines.delay(10)
-        }
+        syncStarted.await()
 
         syncJob.cancelAndJoin()
 
@@ -433,7 +464,9 @@ class VaultRepositoryTest {
         unlockRepositoryDirectly(repository)
 
         val syncPause = CompletableDeferred<Unit>()
+        val syncStarted = CompletableDeferred<Unit>()
         fakeApi.syncPauseDeferred = syncPause
+        fakeApi.syncStartedDeferred = syncStarted
 
         val currentVek = getVek(repository)
         val env = createValidEnvelope(currentVek, "stale-1", "Stale Item")
@@ -450,9 +483,7 @@ class VaultRepositoryTest {
             repository.syncRecords()
         }
 
-        while (fakeApi.syncCallCount == 0) {
-            kotlinx.coroutines.delay(10)
-        }
+        syncStarted.await()
 
         // Lock the repository
         repository.lock()
@@ -883,6 +914,7 @@ class VaultRepositoryTest {
         val env1 = createValidEnvelope(vek, "rec-1", "Item 1")
         val env2 = createValidEnvelope(vek, "rec-2", "Item 2")
         val page2Pause = CompletableDeferred<Unit>()
+        val page2Entered = CompletableDeferred<Unit>()
 
         fakeApi.syncHandler = { sinceCursor, _ ->
             when (sinceCursor) {
@@ -893,6 +925,7 @@ class VaultRepositoryTest {
                     hasMore = true
                 )
                 1 -> {
+                    page2Entered.complete(Unit)
                     page2Pause.await()
                     SyncResponse(
                         items = listOf(RecordResponse(recordId = "rec-2", ciphertextPayload = VaultCrypto.serializeRecordEnvelope(env2), revision = 1, syncCursor = 2)),
@@ -909,9 +942,7 @@ class VaultRepositoryTest {
             repository.forceFullResync()
         }
 
-        while (fakeApi.syncCallCount < 2) {
-            kotlinx.coroutines.delay(10)
-        }
+        page2Entered.await()
 
         // Lock while page 2 is in flight
         repository.lock()
@@ -933,6 +964,8 @@ class VaultRepositoryTest {
 
         val env1 = createValidEnvelope(vek, "rec-1", "Session 1 Item")
         val resyncPause = CompletableDeferred<Unit>()
+        val resyncStarted = CompletableDeferred<Unit>()
+        fakeApi.syncStartedDeferred = resyncStarted
 
         fakeApi.syncHandler = { sinceCursor, _ ->
             resyncPause.await()
@@ -948,9 +981,7 @@ class VaultRepositoryTest {
             repository.forceFullResync()
         }
 
-        while (fakeApi.syncCallCount == 0) {
-            kotlinx.coroutines.delay(10)
-        }
+        resyncStarted.await()
 
         // Session 1 logs out, Session 2 logs in
         repository.logout()
@@ -965,5 +996,53 @@ class VaultRepositoryTest {
         assertEquals("user2", repository.username)
         assertEquals(0, repository.items.value.size)
         assertNull(repository.getItem("rec-1"))
+    }
+
+    @Test
+    fun testLoginFailureWhenKeystoreFailsToPersist() = runBlocking {
+        var failSave = false
+        keyStoreManager = object : KeyStoreManager() {
+            override fun saveSessionToken(token: String) {
+                if (failSave) {
+                    clearSessionToken()
+                    throw SecureStorageException("Synthetic storage failure")
+                }
+                super.saveSessionToken(token)
+            }
+        }
+        repository = VaultRepository(fakeApi, keyStoreManager, VaultCrypto)
+        unlockRepositoryDirectly(repository)
+        val previousKey = getVek(repository)
+        failSave = true
+
+        assertThrows(SecureStorageException::class.java) {
+            runBlocking {
+                repository.loginAccount("testuser", "testpass")
+            }
+        }
+
+        // Invariant: Repository state must fail closed into clean unauthenticated state
+        assertFalse(repository.sessionState.value.isAuthenticated)
+        assertFalse(repository.sessionState.value.isUnlocked)
+        assertNull(repository.api.sessionToken)
+        assertEquals("", repository.username)
+        assertEquals("", repository.accountId)
+        assertTrue(repository.sessionState.value.errorMessage?.contains("Failed to securely store session") == true)
+        assertTrue(previousKey.all { it == 0.toByte() })
+        assertNull(keyStoreManager.getSessionToken())
+        failSave = false
+        repository.loginAccount("testuser", "testpass")
+        assertTrue(repository.sessionState.value.isAuthenticated)
+    }
+
+    @Test
+    fun testInvalidStoredTokenStartsUnauthenticated() {
+        val brokenStorage = object : KeyStoreManager() {
+            override fun getSessionToken(): String? = throw SecureStorageException("Synthetic invalidated key")
+        }
+        fakeApi.sessionToken = "synthetic-stale-token"
+        val restored = VaultRepository(fakeApi, brokenStorage, VaultCrypto)
+        assertFalse(restored.sessionState.value.isAuthenticated)
+        assertNull(fakeApi.sessionToken)
     }
 }
