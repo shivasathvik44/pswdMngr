@@ -25,6 +25,9 @@ open class KeyStoreManager(private val context: Context? = null) {
         private const val PREF_TOKEN_IV = "session_token_iv"
         private const val PREF_SERVER_URL = "server_url"
         private const val PREF_LAST_USERNAME = "last_username"
+        private const val PREF_LAST_ACCOUNT_ID = "last_account_id"
+        private const val PREF_WRAPPED_VAULT_KEY = "wrapped_vault_key"
+        private const val PREF_KDF_SALT = "kdf_salt"
         private const val PREF_AUTO_LOCK_MINUTES = "auto_lock_minutes"
         private const val PREF_CLIPBOARD_CLEAR_SECONDS = "clipboard_clear_seconds"
     }
@@ -147,6 +150,40 @@ open class KeyStoreManager(private val context: Context? = null) {
         set(value) {
             prefs?.edit()?.putString(PREF_LAST_USERNAME, value)?.apply()
             inMemoryFallback[PREF_LAST_USERNAME] = value
+        }
+
+    open var lastAccountId: String
+        get() = prefs?.getString(PREF_LAST_ACCOUNT_ID, "")
+            ?: (inMemoryFallback[PREF_LAST_ACCOUNT_ID] as? String ?: "")
+        set(value) {
+            prefs?.edit()?.putString(PREF_LAST_ACCOUNT_ID, value)?.apply()
+            inMemoryFallback[PREF_LAST_ACCOUNT_ID] = value
+        }
+
+    open var lastWrappedVaultKey: String?
+        get() = prefs?.getString(PREF_WRAPPED_VAULT_KEY, null)
+            ?: (inMemoryFallback[PREF_WRAPPED_VAULT_KEY] as? String)
+        set(value) {
+            if (value != null) {
+                prefs?.edit()?.putString(PREF_WRAPPED_VAULT_KEY, value)?.apply()
+                inMemoryFallback[PREF_WRAPPED_VAULT_KEY] = value
+            } else {
+                prefs?.edit()?.remove(PREF_WRAPPED_VAULT_KEY)?.apply()
+                inMemoryFallback.remove(PREF_WRAPPED_VAULT_KEY)
+            }
+        }
+
+    open var lastKdfSalt: String?
+        get() = prefs?.getString(PREF_KDF_SALT, null)
+            ?: (inMemoryFallback[PREF_KDF_SALT] as? String)
+        set(value) {
+            if (value != null) {
+                prefs?.edit()?.putString(PREF_KDF_SALT, value)?.apply()
+                inMemoryFallback[PREF_KDF_SALT] = value
+            } else {
+                prefs?.edit()?.remove(PREF_KDF_SALT)?.apply()
+                inMemoryFallback.remove(PREF_KDF_SALT)
+            }
         }
 
     open var autoLockMinutes: Int

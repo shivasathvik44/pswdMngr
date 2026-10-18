@@ -53,3 +53,32 @@ data class RecordEnvelope(
     val nonce: String,     // Base64 encoded 12-byte nonce
     val ciphertext: String // Base64 encoded ciphertext + 16-byte GCM tag
 )
+
+/**
+ * Custom exceptions for biometric authentication and Keystore lifecycle.
+ */
+open class BiometricException(message: String, cause: Throwable? = null) : CryptoException(message, cause)
+
+class BiometricKeyInvalidatedException(
+    message: String = "Biometric credentials have changed. Re-authentication with Master Password required.",
+    cause: Throwable? = null
+) : BiometricException(message, cause)
+
+class BiometricAuthFailedException(
+    message: String,
+    cause: Throwable? = null
+) : BiometricException(message, cause)
+
+/**
+ * Envelope for a biometric-protected Vault Encryption Key (VEK).
+ * Encrypted using a device-local hardware-backed Android Keystore AES-256-GCM key.
+ */
+@Serializable
+data class BiometricWrappedKeyEnvelope(
+    val version: Int = 1,
+    @SerialName("account_id") val accountId: String,
+    val nonce: String,     // Base64 encoded 12-byte IV/nonce
+    val ciphertext: String, // Base64 encoded VEK ciphertext + 16-byte GCM tag
+    @SerialName("created_at") val createdAt: Long = System.currentTimeMillis()
+)
+

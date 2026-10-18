@@ -16,7 +16,9 @@ data class SessionState(
     val isSyncing: Boolean = false,
     val syncStatusMessage: String = "Synced",
     val errorMessage: String? = null,
-    val warningMessage: String? = null
+    val warningMessage: String? = null,
+    val isBiometricEnabled: Boolean = false,
+    val isBiometricAvailable: Boolean = false
 ) {
     val isLoggedIn: Boolean
         get() = isAuthenticated

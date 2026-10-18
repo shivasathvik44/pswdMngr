@@ -20,6 +20,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -282,13 +283,13 @@ class VaultRepositoryTest {
             repository.syncRecords()
         }
 
-        syncStarted.await()
+        withTimeout(5_000L) { syncStarted.await() }
 
         repository.lock()
         assertFalse(repository.sessionState.value.isUnlocked)
 
         pauseDeferred.complete(Unit)
-        syncJob.join()
+        withTimeout(5_000L) { syncJob.join() }
 
         assertEquals(0, repository.items.value.size)
         assertNull(repository.getItem("rec-1"))
@@ -308,14 +309,14 @@ class VaultRepositoryTest {
             repository.syncRecords()
         }
 
-        syncStarted.await()
+        withTimeout(5_000L) { syncStarted.await() }
 
         val oldSessionGen = repository.sessionGeneration
         repository.logout()
         assertTrue(repository.sessionGeneration > oldSessionGen)
 
         pauseDeferred.complete(Unit)
-        syncJob.join()
+        withTimeout(5_000L) { syncJob.join() }
 
         assertEquals(0, repository.items.value.size)
         assertFalse(repository.sessionState.value.isAuthenticated)
@@ -336,7 +337,7 @@ class VaultRepositoryTest {
             }
         }
 
-        loginAStarted.await()
+        withTimeout(5_000L) { loginAStarted.await() }
 
         // Session B logs in while Session A is pending
         fakeApi.loginPauseDeferred = null
@@ -347,7 +348,7 @@ class VaultRepositoryTest {
 
         // Now Session A's late response completes
         loginAPause.complete(Unit)
-        loginAJob.join()
+        withTimeout(5_000L) { loginAJob.join() }
 
         // Invariant: Session A must NOT overwrite Session B's state!
         assertEquals("userB", repository.username)
@@ -368,7 +369,7 @@ class VaultRepositoryTest {
             repository.syncRecords()
         }
 
-        syncStarted.await()
+        withTimeout(5_000L) { syncStarted.await() }
 
         // New session starts: logout then login
         repository.logout()
@@ -379,7 +380,7 @@ class VaultRepositoryTest {
         // Old sync now throws network error
         fakeApi.syncExceptionToThrow = NetworkConnectionException("Connection timeout")
         syncPause.complete(Unit)
-        syncJob.join()
+        withTimeout(5_000L) { syncJob.join() }
 
         // Invariant: Stale sync failure must NOT update new session's state
         assertEquals("userB", repository.sessionState.value.username)
@@ -412,14 +413,14 @@ class VaultRepositoryTest {
             }
         }
 
-        createStarted.await()
+        withTimeout(5_000L) { createStarted.await() }
 
         // Lock while saveItem is in flight awaiting network response
         repository.lock()
         assertFalse(repository.sessionState.value.isUnlocked)
 
         createPause.complete(Unit)
-        saveJob.join()
+        withTimeout(5_000L) { saveJob.join() }
 
         // Invariant: Must throw IllegalStateException and NOT publish item!
         assertNotNull(createException)
@@ -441,9 +442,9 @@ class VaultRepositoryTest {
             repository.syncRecords()
         }
 
-        syncStarted.await()
+        withTimeout(5_000L) { syncStarted.await() }
 
-        syncJob.cancelAndJoin()
+        withTimeout(5_000L) { syncJob.cancelAndJoin() }
 
         pauseDeferred.complete(Unit)
         fakeApi.syncPauseDeferred = null
@@ -483,7 +484,7 @@ class VaultRepositoryTest {
             repository.syncRecords()
         }
 
-        syncStarted.await()
+        withTimeout(5_000L) { syncStarted.await() }
 
         // Lock the repository
         repository.lock()
@@ -491,7 +492,7 @@ class VaultRepositoryTest {
 
         // Resume stale sync
         syncPause.complete(Unit)
-        syncJob.join()
+        withTimeout(5_000L) { syncJob.join() }
 
         // Invariant: Stale cursor (999) must NOT overwrite cursor
         assertEquals(0, repository.syncCursor)
@@ -942,14 +943,14 @@ class VaultRepositoryTest {
             repository.forceFullResync()
         }
 
-        page2Entered.await()
+        withTimeout(5_000L) { page2Entered.await() }
 
         // Lock while page 2 is in flight
         repository.lock()
         assertFalse(repository.sessionState.value.isUnlocked)
 
         page2Pause.complete(Unit)
-        resyncJob.join()
+        withTimeout(5_000L) { resyncJob.join() }
 
         // Invariant: Staged records from page 1 and page 2 must NOT be published!
         assertEquals(0, repository.items.value.size)
@@ -981,7 +982,7 @@ class VaultRepositoryTest {
             repository.forceFullResync()
         }
 
-        resyncStarted.await()
+        withTimeout(5_000L) { resyncStarted.await() }
 
         // Session 1 logs out, Session 2 logs in
         repository.logout()
@@ -990,7 +991,7 @@ class VaultRepositoryTest {
 
         // Session 1's resync now returns
         resyncPause.complete(Unit)
-        resyncJob.join()
+        withTimeout(5_000L) { resyncJob.join() }
 
         // Invariant: Session 1's records must NOT publish into Session 2!
         assertEquals("user2", repository.username)

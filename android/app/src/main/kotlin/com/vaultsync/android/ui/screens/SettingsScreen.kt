@@ -335,6 +335,82 @@ fun SettingsScreen(
             Spacer(modifier = Modifier.height(24.dp))
 
             Text(
+                text = "Biometric Authentication",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Unlock with Biometrics",
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Use device fingerprint or face recognition to unlock your vault without typing your master password every time.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    val context = androidx.compose.ui.platform.LocalContext.current
+                    androidx.compose.material3.Switch(
+                        checked = uiState.isBiometricEnabled,
+                        onCheckedChange = { enable ->
+                            if (enable) {
+                                val activity = context as? androidx.fragment.app.FragmentActivity
+                                if (activity != null) {
+                                    val cipher = settingsViewModel.getBiometricEncryptCipher()
+                                    if (cipher != null) {
+                                        val executor = androidx.core.content.ContextCompat.getMainExecutor(context)
+                                        val prompt = androidx.biometric.BiometricPrompt(
+                                            activity,
+                                            executor,
+                                            object : androidx.biometric.BiometricPrompt.AuthenticationCallback() {
+                                                override fun onAuthenticationSucceeded(result: androidx.biometric.BiometricPrompt.AuthenticationResult) {
+                                                    val authenticatedCipher = result.cryptoObject?.cipher
+                                                    if (authenticatedCipher != null) {
+                                                        settingsViewModel.enableBiometric(authenticatedCipher)
+                                                    }
+                                                }
+                                                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                                                    // User canceled enrollment
+                                                }
+                                            }
+                                        )
+                                        val promptInfo = androidx.biometric.BiometricPrompt.PromptInfo.Builder()
+                                            .setTitle("Enable Biometric Unlock")
+                                            .setSubtitle("Confirm your biometric to protect the Vault Encryption Key")
+                                            .setNegativeButtonText("Cancel")
+                                            .build()
+                                        prompt.authenticate(promptInfo, androidx.biometric.BiometricPrompt.CryptoObject(cipher))
+                                    }
+                                }
+                            } else {
+                                settingsViewModel.disableBiometric()
+                            }
+                        }
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Text(
                 text = "Credentials & Cryptography",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,

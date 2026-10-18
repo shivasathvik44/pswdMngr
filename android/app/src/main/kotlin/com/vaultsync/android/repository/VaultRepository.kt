@@ -9,13 +9,20 @@ import com.vaultsync.android.api.LoginRequest
 import com.vaultsync.android.api.RegisterRequest
 import com.vaultsync.android.api.UpdateRecordRequest
 import com.vaultsync.android.api.UpdateVaultKeyRequest
+import com.vaultsync.android.crypto.BiometricKeyManager
+import com.vaultsync.android.crypto.BiometricWrappedKeyEnvelope
 import com.vaultsync.android.crypto.KeyStoreManager
 import com.vaultsync.android.crypto.RecordEnvelope
 import com.vaultsync.android.crypto.SecureStorageException
 import com.vaultsync.android.crypto.VaultCrypto
 import com.vaultsync.android.crypto.WrappedKeyEnvelope
+import com.vaultsync.android.db.EncryptedRecordEntity
+import com.vaultsync.android.db.SyncStateEntity
+import com.vaultsync.android.db.VaultDatabase
 import com.vaultsync.android.model.SessionState
 import com.vaultsync.android.model.VaultItem
+import java.time.Instant
+import javax.crypto.Cipher
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -37,7 +44,9 @@ import java.util.Collections
 class VaultRepository(
     val api: ApiClient,
     val keyStoreManager: KeyStoreManager,
-    val vaultCrypto: VaultCrypto = VaultCrypto
+    val vaultCrypto: VaultCrypto = VaultCrypto,
+    val database: VaultDatabase? = null,
+    val biometricKeyManager: BiometricKeyManager = BiometricKeyManager(null)
 ) {
 
     private val json = Json {
@@ -97,10 +106,16 @@ class VaultRepository(
             if (!storedToken.isNullOrBlank()) {
                 api.sessionToken = storedToken
                 username = keyStoreManager.lastUsername
+                accountId = keyStoreManager.lastAccountId
+                wrappedVaultKey = keyStoreManager.lastWrappedVaultKey
+                kdfSalt = keyStoreManager.lastKdfSalt
+                val bioEnabled = if (accountId.isNotBlank()) biometricKeyManager.isBiometricEnabled(accountId) else false
                 _sessionState.update {
                     it.copy(
                         username = username,
-                        isAuthenticated = true
+                        accountId = accountId,
+                        isAuthenticated = true,
+                        isBiometricEnabled = bioEnabled
                     )
                 }
             }
@@ -277,10 +292,19 @@ class VaultRepository(
         } catch (_: Exception) {
             // Best effort clear
         }
+        keyStoreManager.lastAccountId = ""
+        keyStoreManager.lastWrappedVaultKey = null
+        keyStoreManager.lastKdfSalt = null
+        username = ""
+        accountId = ""
+        wrappedVaultKey = null
+        kdfSalt = null
         _sessionState.update {
             it.copy(
                 isAuthenticated = false,
                 isUnlocked = false,
+                username = "",
+                accountId = "",
                 warningMessage = "Your session has expired or was revoked. Please log in again."
             )
         }
@@ -307,6 +331,16 @@ class VaultRepository(
             } catch (_: Exception) {
                 // Best effort clear
             }
+            val accToClear = accountId
+            if (accToClear.isNotBlank()) {
+                try {
+                    biometricKeyManager.deleteBiometricKey(accToClear)
+                } catch (_: Exception) {
+                }
+            }
+            keyStoreManager.lastAccountId = ""
+            keyStoreManager.lastWrappedVaultKey = null
+            keyStoreManager.lastKdfSalt = null
             api.sessionToken = null
             username = ""
             accountId = ""
@@ -320,7 +354,8 @@ class VaultRepository(
                     username = "",
                     accountId = "",
                     itemCount = 0,
-                    corruptedRecordCount = 0
+                    corruptedRecordCount = 0,
+                    isBiometricEnabled = false
                 )
             }
         }
@@ -388,6 +423,9 @@ class VaultRepository(
         try {
             keyStoreManager.saveSessionToken(res.sessionToken)
             keyStoreManager.lastUsername = cleanUser
+            keyStoreManager.lastAccountId = res.accountId
+            keyStoreManager.lastWrappedVaultKey = res.wrappedVaultKey
+            keyStoreManager.lastKdfSalt = res.kdfSalt
         } catch (e: SecureStorageException) {
             lock()
             api.sessionToken = null
@@ -397,6 +435,9 @@ class VaultRepository(
                 wrappedVaultKey = null
                 kdfSalt = null
             }
+            keyStoreManager.lastAccountId = ""
+            keyStoreManager.lastWrappedVaultKey = null
+            keyStoreManager.lastKdfSalt = null
             _sessionState.update {
                 it.copy(
                     isAuthenticated = false,
@@ -409,6 +450,20 @@ class VaultRepository(
             throw e
         }
 
+        // Restore persisted sync cursor for this account if available
+        if (database != null && res.accountId.isNotBlank()) {
+            try {
+                val syncState = database.syncStateDao().getSyncState(res.accountId)
+                if (syncState != null) {
+                    synchronized(keyLock) {
+                        syncCursor = syncState.lastSyncCursor
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        val bioEnabled = if (res.accountId.isNotBlank()) biometricKeyManager.isBiometricEnabled(res.accountId) else false
         _sessionState.update {
             if (sessionGeneration != capturedSessionGen) return@update it
             it.copy(
@@ -417,7 +472,8 @@ class VaultRepository(
                 isAuthenticated = true,
                 isUnlocked = false,
                 errorMessage = null,
-                warningMessage = null
+                warningMessage = null,
+                isBiometricEnabled = bioEnabled
             )
         }
     }
@@ -433,8 +489,12 @@ class VaultRepository(
         val envelope = json.decodeFromString<WrappedKeyEnvelope>(envelopeString)
         val vek = VaultCrypto.unwrapVaultKey(envelope, vaultMasterPasswordInput)
 
+        val currentLockGen: Long
+        val currentSessionGen: Long
         synchronized(keyLock) {
             lockGeneration++
+            currentLockGen = lockGeneration
+            currentSessionGen = sessionGeneration
             _vaultKey = vek
         }
         onUserActivity()
@@ -446,7 +506,147 @@ class VaultRepository(
             )
         }
 
-        syncRecords()
+        // Load offline cached records immediately so vault is immediately usable without network
+        loadCachedRecordsFromDb(currentLockGen, currentSessionGen)
+
+        // Then attempt background sync with server
+        try {
+            syncRecords()
+        } catch (_: Exception) {
+        }
+    }
+
+    fun isBiometricUnlockAvailable(): Boolean {
+        val acc = synchronized(keyLock) { accountId }
+        return acc.isNotBlank() && biometricKeyManager.isBiometricEnabled(acc)
+    }
+
+    fun canEnableBiometric(): Boolean {
+        synchronized(keyLock) {
+            return _sessionState.value.isUnlocked && _vaultKey != null && accountId.isNotBlank()
+        }
+    }
+
+    fun enableBiometricUnlock(authenticatedCipher: Cipher): BiometricWrappedKeyEnvelope {
+        val acc: String
+        val keyCopy: ByteArray
+        synchronized(keyLock) {
+            if (!_sessionState.value.isUnlocked || _vaultKey == null || accountId.isBlank()) {
+                throw IllegalStateException("Vault must be unlocked to enable biometric authentication")
+            }
+            acc = accountId
+            keyCopy = _vaultKey!!.clone()
+        }
+        try {
+            val envelope = biometricKeyManager.wrapVek(authenticatedCipher, acc, keyCopy)
+            _sessionState.update { it.copy(isBiometricEnabled = true) }
+            return envelope
+        } finally {
+            VaultCrypto.clearBytes(keyCopy)
+        }
+    }
+
+    fun disableBiometricUnlock() {
+        val acc = synchronized(keyLock) { accountId }
+        if (acc.isNotBlank()) {
+            biometricKeyManager.deleteBiometricKey(acc)
+        }
+        _sessionState.update { it.copy(isBiometricEnabled = false) }
+    }
+
+    suspend fun unlockWithVek(vek: ByteArray) {
+        require(vek.size == 32) { "Invalid VEK size: ${vek.size}" }
+        val currentLockGen: Long
+        val currentSessionGen: Long
+        synchronized(keyLock) {
+            currentSessionGen = sessionGeneration
+            if (!_sessionState.value.isAuthenticated || accountId.isBlank()) {
+                VaultCrypto.clearBytes(vek)
+                throw IllegalStateException("Session not authenticated")
+            }
+            lockGeneration++
+            currentLockGen = lockGeneration
+            _vaultKey = vek
+        }
+        onUserActivity()
+
+        _sessionState.update {
+            it.copy(
+                isUnlocked = true,
+                errorMessage = null
+            )
+        }
+
+        // Load offline cached records immediately so vault is immediately usable without network
+        loadCachedRecordsFromDb(currentLockGen, currentSessionGen)
+
+        // Then attempt background sync with server
+        try {
+            syncRecords()
+        } catch (_: Exception) {
+        }
+    }
+
+    private suspend fun loadCachedRecordsFromDb(capturedLockGen: Long, capturedSessionGen: Long) {
+        val db = database ?: return
+        val accId = synchronized(keyLock) { accountId }
+        if (accId.isBlank()) return
+
+        try {
+            val cachedEntities = db.recordDao().getActiveRecords(accId)
+            val cachedItems = mutableMapOf<String, VaultItem>()
+            val cachedCorrupted = mutableMapOf<String, String>()
+
+            for (entity in cachedEntities) {
+                if (!isOperationValid(capturedLockGen, capturedSessionGen)) return
+
+                if (entity.ciphertextPayload.isNotBlank()) {
+                    try {
+                        val env = json.decodeFromString<RecordEnvelope>(entity.ciphertextPayload)
+                        if (env.recordId == entity.recordId) {
+                            val plaintext = decryptRecordSafely(capturedLockGen, capturedSessionGen, env)
+                            if (plaintext != null) {
+                                cachedItems[entity.recordId] = VaultItem.fromSecretJson(
+                                    recordId = entity.recordId,
+                                    revision = entity.revision,
+                                    secretJson = plaintext
+                                )
+                            }
+                        } else {
+                            cachedCorrupted[entity.recordId] = "Mismatched envelope record_id: ${env.recordId}"
+                        }
+                    } catch (e: Exception) {
+                        cachedCorrupted[entity.recordId] = e.message ?: "Decryption failed"
+                    }
+                }
+            }
+
+            val syncState = db.syncStateDao().getSyncState(accId)
+            val savedCursor = syncState?.lastSyncCursor ?: 0
+
+            synchronized(keyLock) {
+                if (lockGeneration != capturedLockGen || sessionGeneration != capturedSessionGen || !_sessionState.value.isUnlocked) {
+                    return
+                }
+                _itemsMap.clear()
+                _itemsMap.putAll(cachedItems)
+                _corruptedRecords.clear()
+                _corruptedRecords.putAll(cachedCorrupted)
+                syncCursor = savedCursor
+                _itemsFlow.value = _itemsMap.values.filter { !it.isDeleted }.toList()
+            }
+
+            _sessionState.update {
+                if (!isOperationValid(capturedLockGen, capturedSessionGen)) return@update it
+                it.copy(
+                    itemCount = cachedItems.size,
+                    corruptedRecordCount = cachedCorrupted.size,
+                    syncStatusMessage = "Loaded ${cachedItems.size} offline items"
+                )
+            }
+        } catch (_: Exception) {
+            // DB failure: fail closed to in-memory state
+        }
     }
 
     // ------------------------------------------------------------------------
@@ -485,6 +685,7 @@ class VaultRepository(
         // Staging buffers - existing items are NOT cleared until replacement is validated
         val stagingItems = mutableMapOf<String, VaultItem>()
         val stagingCorrupted = mutableMapOf<String, String>()
+        val stagingEntitiesMap = mutableMapOf<String, EncryptedRecordEntity>()
         var currentCursor = 0
         var highestValidCursor = 0
         var hasEncounteredCorruption = false
@@ -507,12 +708,24 @@ class VaultRepository(
                     return@withLock
                 }
 
+                val accId = synchronized(keyLock) { accountId }
+
                 for (rec in syncData.items) {
                     if (!isOperationValid(gen, sessionGen)) return@withLock
 
                     if (rec.isDeleted) {
                         stagingItems.remove(rec.recordId)
                         stagingCorrupted.remove(rec.recordId)
+                        stagingEntitiesMap[rec.recordId] = EncryptedRecordEntity(
+                            accountId = accId,
+                            recordId = rec.recordId,
+                            revision = rec.revision,
+                            syncCursor = rec.syncCursor,
+                            isDeleted = true,
+                            ciphertextPayload = "",
+                            createdAt = rec.createdAt,
+                            updatedAt = rec.updatedAt
+                        )
                         if (!hasEncounteredCorruption) {
                             highestValidCursor = maxOf(highestValidCursor, rec.syncCursor)
                         }
@@ -529,6 +742,17 @@ class VaultRepository(
                                     )
                                     stagingItems[rec.recordId] = item
                                     stagingCorrupted.remove(rec.recordId)
+                                    stagingEntitiesMap[rec.recordId] = EncryptedRecordEntity(
+                                        accountId = accId,
+                                        recordId = rec.recordId,
+                                        revision = rec.revision,
+                                        syncCursor = rec.syncCursor,
+                                        isDeleted = false,
+                                        ciphertextPayload = rec.ciphertextPayload,
+                                        createdAt = rec.createdAt,
+                                        updatedAt = rec.updatedAt,
+                                        isCorrupted = false
+                                    )
                                     if (!hasEncounteredCorruption) {
                                         highestValidCursor = maxOf(highestValidCursor, rec.syncCursor)
                                     }
@@ -537,12 +761,38 @@ class VaultRepository(
                                     return@withLock
                                 }
                             } else {
-                                stagingCorrupted[rec.recordId] = "Mismatched envelope record_id: ${env.recordId}"
+                                val err = "Mismatched envelope record_id: ${env.recordId}"
+                                stagingCorrupted[rec.recordId] = err
+                                stagingEntitiesMap[rec.recordId] = EncryptedRecordEntity(
+                                    accountId = accId,
+                                    recordId = rec.recordId,
+                                    revision = rec.revision,
+                                    syncCursor = rec.syncCursor,
+                                    isDeleted = false,
+                                    ciphertextPayload = rec.ciphertextPayload,
+                                    createdAt = rec.createdAt,
+                                    updatedAt = rec.updatedAt,
+                                    isCorrupted = true,
+                                    corruptionReason = err
+                                )
                                 hasEncounteredCorruption = true
                             }
                         } catch (e: Exception) {
                             // Record affected identifier safely without leaking plaintext or keys
-                            stagingCorrupted[rec.recordId] = e.message ?: "Decryption failed"
+                            val err = e.message ?: "Decryption failed"
+                            stagingCorrupted[rec.recordId] = err
+                            stagingEntitiesMap[rec.recordId] = EncryptedRecordEntity(
+                                accountId = accId,
+                                recordId = rec.recordId,
+                                revision = rec.revision,
+                                syncCursor = rec.syncCursor,
+                                isDeleted = false,
+                                ciphertextPayload = rec.ciphertextPayload,
+                                createdAt = rec.createdAt,
+                                updatedAt = rec.updatedAt,
+                                isCorrupted = true,
+                                corruptionReason = err
+                            )
                             hasEncounteredCorruption = true
                         }
                     } else {
@@ -566,6 +816,24 @@ class VaultRepository(
 
                 if (!syncData.hasMore || syncData.items.isEmpty()) {
                     break
+                }
+            }
+
+            // Persist full state to Room database
+            val accId = synchronized(keyLock) { accountId }
+            val finalSafeCursor = if (stagingCorrupted.isEmpty()) currentCursor else highestValidCursor
+            if (database != null && accId.isNotBlank()) {
+                try {
+                    database.recordDao().replaceAccountRecords(accId, stagingEntitiesMap.values.toList())
+                    database.syncStateDao().setSyncState(
+                        SyncStateEntity(
+                            accountId = accId,
+                            lastSyncCursor = finalSafeCursor,
+                            lastSyncedAt = System.currentTimeMillis()
+                        )
+                    )
+                } catch (_: Exception) {
+                    // Database write failure: fail closed to in-memory state
                 }
             }
 
@@ -653,6 +921,7 @@ class VaultRepository(
         // Staging buffers for atomic incremental update
         val stagingItems = synchronized(keyLock) { HashMap(_itemsMap) }
         val stagingCorrupted = synchronized(keyLock) { HashMap(_corruptedRecords) }
+        val stagingEntities = mutableMapOf<String, EncryptedRecordEntity>()
         var currentCursor = synchronized(keyLock) { syncCursor }
         val visitedCursors = mutableSetOf<Int>()
 
@@ -673,12 +942,24 @@ class VaultRepository(
                     return
                 }
 
+                val accId = synchronized(keyLock) { accountId }
+
                 for (rec in syncData.items) {
                     if (!isOperationValid(gen, sessionGen)) return
 
                     if (rec.isDeleted) {
                         stagingItems.remove(rec.recordId)
                         stagingCorrupted.remove(rec.recordId)
+                        stagingEntities[rec.recordId] = EncryptedRecordEntity(
+                            accountId = accId,
+                            recordId = rec.recordId,
+                            revision = rec.revision,
+                            syncCursor = rec.syncCursor,
+                            isDeleted = true,
+                            ciphertextPayload = "",
+                            createdAt = rec.createdAt,
+                            updatedAt = rec.updatedAt
+                        )
                     } else if (rec.ciphertextPayload.isNotBlank()) {
                         try {
                             val env = json.decodeFromString<RecordEnvelope>(rec.ciphertextPayload)
@@ -692,14 +973,51 @@ class VaultRepository(
                                     )
                                     stagingItems[rec.recordId] = item
                                     stagingCorrupted.remove(rec.recordId)
+                                    stagingEntities[rec.recordId] = EncryptedRecordEntity(
+                                        accountId = accId,
+                                        recordId = rec.recordId,
+                                        revision = rec.revision,
+                                        syncCursor = rec.syncCursor,
+                                        isDeleted = false,
+                                        ciphertextPayload = rec.ciphertextPayload,
+                                        createdAt = rec.createdAt,
+                                        updatedAt = rec.updatedAt,
+                                        isCorrupted = false
+                                    )
                                 } else {
                                     return
                                 }
                             } else {
-                                stagingCorrupted[rec.recordId] = "Mismatched envelope record_id: ${env.recordId}"
+                                val err = "Mismatched envelope record_id: ${env.recordId}"
+                                stagingCorrupted[rec.recordId] = err
+                                stagingEntities[rec.recordId] = EncryptedRecordEntity(
+                                    accountId = accId,
+                                    recordId = rec.recordId,
+                                    revision = rec.revision,
+                                    syncCursor = rec.syncCursor,
+                                    isDeleted = false,
+                                    ciphertextPayload = rec.ciphertextPayload,
+                                    createdAt = rec.createdAt,
+                                    updatedAt = rec.updatedAt,
+                                    isCorrupted = true,
+                                    corruptionReason = err
+                                )
                             }
                         } catch (e: Exception) {
-                            stagingCorrupted[rec.recordId] = e.message ?: "Decryption failed"
+                            val err = e.message ?: "Decryption failed"
+                            stagingCorrupted[rec.recordId] = err
+                            stagingEntities[rec.recordId] = EncryptedRecordEntity(
+                                accountId = accId,
+                                recordId = rec.recordId,
+                                revision = rec.revision,
+                                syncCursor = rec.syncCursor,
+                                isDeleted = false,
+                                ciphertextPayload = rec.ciphertextPayload,
+                                createdAt = rec.createdAt,
+                                updatedAt = rec.updatedAt,
+                                isCorrupted = true,
+                                corruptionReason = err
+                            )
                         }
                     }
                 }
@@ -714,6 +1032,23 @@ class VaultRepository(
 
                 if (!syncData.hasMore || syncData.items.isEmpty()) {
                     break
+                }
+            }
+
+            // Persist incremental updates to Room database
+            val accId = synchronized(keyLock) { accountId }
+            if (database != null && accId.isNotBlank() && stagingEntities.isNotEmpty()) {
+                try {
+                    database.recordDao().upsertRecords(stagingEntities.values.toList())
+                    database.syncStateDao().setSyncState(
+                        SyncStateEntity(
+                            accountId = accId,
+                            lastSyncCursor = currentCursor,
+                            lastSyncedAt = System.currentTimeMillis()
+                        )
+                    )
+                } catch (_: Exception) {
+                    // Database write failure: fail closed to in-memory state
                 }
             }
 
@@ -817,6 +1152,27 @@ class VaultRepository(
             updatedAt = res.updatedAt ?: item.updatedAt
         )
 
+        val accId = synchronized(keyLock) { accountId }
+        if (database != null && accId.isNotBlank()) {
+            try {
+                database.recordDao().upsertRecord(
+                    EncryptedRecordEntity(
+                        accountId = accId,
+                        recordId = item.id,
+                        revision = res.revision,
+                        syncCursor = res.syncCursor,
+                        isDeleted = false,
+                        ciphertextPayload = envelopeJson,
+                        createdAt = res.createdAt ?: item.createdAt,
+                        updatedAt = res.updatedAt ?: item.updatedAt,
+                        isCorrupted = false
+                    )
+                )
+            } catch (_: Exception) {
+                // Database write failure: fail closed to in-memory state
+            }
+        }
+
         synchronized(keyLock) {
             if (lockGeneration != gen || sessionGeneration != sessionGen || !_sessionState.value.isUnlocked) {
                 throw IllegalStateException("Operation invalidated: session or lock generation changed")
@@ -852,6 +1208,19 @@ class VaultRepository(
         } catch (e: AuthenticationException) {
             handleAuthFailure()
             throw e
+        }
+
+        val accId = synchronized(keyLock) { accountId }
+        if (database != null && accId.isNotBlank()) {
+            try {
+                database.recordDao().markDeleted(
+                    accountId = accId,
+                    recordId = itemId,
+                    updatedAt = Instant.now().toString()
+                )
+            } catch (_: Exception) {
+                // Database write failure: fail closed to in-memory state
+            }
         }
 
         synchronized(keyLock) {
@@ -918,6 +1287,8 @@ class VaultRepository(
                 wrappedVaultKey = newEnvelopeJson
                 kdfSalt = newSaltBase64
             }
+            keyStoreManager.lastWrappedVaultKey = newEnvelopeJson
+            keyStoreManager.lastKdfSalt = newSaltBase64
         } finally {
             VaultCrypto.clearBytes(currentVek)
         }

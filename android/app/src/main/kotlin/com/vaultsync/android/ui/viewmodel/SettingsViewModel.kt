@@ -17,7 +17,8 @@ data class SettingsUiState(
     val errorMessage: String? = null,
     val successMessage: String? = null,
     val showChangeAccountPasswordDialog: Boolean = false,
-    val showRotateMasterPasswordDialog: Boolean = false
+    val showRotateMasterPasswordDialog: Boolean = false,
+    val isBiometricEnabled: Boolean = false
 )
 
 class SettingsViewModel(
@@ -29,7 +30,8 @@ class SettingsViewModel(
             serverUrl = repository.getServerUrl(),
             username = repository.sessionState.value.username ?: "",
             autoLockTimeoutMinutes = repository.getAutoLockTimeoutMinutes(),
-            clipboardTimeoutSeconds = repository.getClipboardTimeoutSeconds()
+            clipboardTimeoutSeconds = repository.getClipboardTimeoutSeconds(),
+            isBiometricEnabled = if (repository.accountId.isNotBlank()) repository.biometricKeyManager.isBiometricEnabled(repository.accountId) else false
         )
     )
     val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
@@ -133,5 +135,54 @@ class SettingsViewModel(
 
     fun lock() {
         repository.lock()
+    }
+
+    fun isBiometricEnabled(): Boolean {
+        val accId = repository.accountId
+        return accId.isNotBlank() && repository.biometricKeyManager.isBiometricEnabled(accId)
+    }
+
+    fun canEnableBiometric(): Boolean {
+        return repository.canEnableBiometric()
+    }
+
+    fun getBiometricEncryptCipher(): javax.crypto.Cipher? {
+        val accId = repository.accountId
+        if (accId.isBlank()) return null
+        return try {
+            repository.biometricKeyManager.initEncryptCipher(accId)
+        } catch (e: Exception) {
+            _uiState.value = _uiState.value.copy(errorMessage = "Failed to initialize biometric enrollment: ${e.message}")
+            null
+        }
+    }
+
+    fun enableBiometric(authenticatedCipher: javax.crypto.Cipher) {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
+            try {
+                repository.enableBiometricUnlock(authenticatedCipher)
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    isBiometricEnabled = true,
+                    successMessage = "Biometric unlock enabled successfully"
+                )
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    errorMessage = e.message ?: "Failed to enable biometric unlock"
+                )
+            }
+        }
+    }
+
+    fun disableBiometric() {
+        viewModelScope.launch {
+            repository.disableBiometricUnlock()
+            _uiState.value = _uiState.value.copy(
+                isBiometricEnabled = false,
+                successMessage = "Biometric unlock disabled"
+            )
+        }
     }
 }

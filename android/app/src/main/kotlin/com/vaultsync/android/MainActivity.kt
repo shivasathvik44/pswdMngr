@@ -2,7 +2,7 @@ package com.vaultsync.android
 
 import android.os.Bundle
 import android.view.WindowManager
-import androidx.activity.ComponentActivity
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.lifecycle.ViewModelProvider
@@ -12,7 +12,7 @@ import com.vaultsync.android.ui.viewmodel.SettingsViewModel
 import com.vaultsync.android.ui.viewmodel.VaultViewModel
 import com.vaultsync.android.ui.viewmodel.VaultViewModelFactory
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
 
     private lateinit var repository: VaultRepository
     private lateinit var authViewModel: AuthViewModel

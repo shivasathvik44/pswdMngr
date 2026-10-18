@@ -183,4 +183,56 @@ class AuthViewModel(
             }
         }
     }
+
+    fun isBiometricUnlockAvailable(): Boolean {
+        return repository.isBiometricUnlockAvailable()
+    }
+
+    fun getBiometricDecryptCipher(): javax.crypto.Cipher? {
+        val accId = repository.accountId
+        if (accId.isBlank() || !repository.biometricKeyManager.isBiometricEnabled(accId)) {
+            return null
+        }
+        return try {
+            repository.biometricKeyManager.initDecryptCipher(accId)
+        } catch (e: com.vaultsync.android.crypto.BiometricKeyInvalidatedException) {
+            _uiState.value = _uiState.value.copy(
+                errorMessage = "Biometric credentials have changed. Please unlock using your Master Password to re-enable biometrics."
+            )
+            null
+        } catch (e: Exception) {
+            _uiState.value = _uiState.value.copy(
+                errorMessage = "Failed to initialize biometric unlock: ${e.message}"
+            )
+            null
+        }
+    }
+
+    fun unlockWithBiometrics(authenticatedCipher: javax.crypto.Cipher, onSuccess: () -> Unit) {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
+            try {
+                val accId = repository.accountId
+                val vek = repository.biometricKeyManager.unwrapVek(authenticatedCipher, accId)
+                try {
+                    repository.unlockWithVek(vek)
+                    _uiState.value = _uiState.value.copy(isLoading = false, masterPassword = "")
+                    onSuccess()
+                } catch (e: Exception) {
+                    com.vaultsync.android.crypto.VaultCrypto.clearBytes(vek)
+                    throw e
+                }
+            } catch (e: com.vaultsync.android.crypto.BiometricKeyInvalidatedException) {
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    errorMessage = "Biometric credentials have changed. Please unlock using your Master Password to re-enable biometrics."
+                )
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    errorMessage = e.message ?: "Biometric unlock failed. Please use your Master Password."
+                )
+            }
+        }
+    }
 }

@@ -7,9 +7,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -97,6 +100,52 @@ fun UnlockScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
+            if (authViewModel.isBiometricUnlockAvailable()) {
+                val context = androidx.compose.ui.platform.LocalContext.current
+                androidx.compose.material3.OutlinedButton(
+                    onClick = {
+                        val activity = context as? androidx.fragment.app.FragmentActivity
+                        if (activity != null) {
+                            val cipher = authViewModel.getBiometricDecryptCipher()
+                            if (cipher != null) {
+                                val executor = androidx.core.content.ContextCompat.getMainExecutor(context)
+                                val prompt = androidx.biometric.BiometricPrompt(
+                                    activity,
+                                    executor,
+                                    object : androidx.biometric.BiometricPrompt.AuthenticationCallback() {
+                                        override fun onAuthenticationSucceeded(result: androidx.biometric.BiometricPrompt.AuthenticationResult) {
+                                            val authenticatedCipher = result.cryptoObject?.cipher
+                                            if (authenticatedCipher != null) {
+                                                authViewModel.unlockWithBiometrics(authenticatedCipher, onUnlockSuccess)
+                                            }
+                                        }
+                                        override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                                            // Fallback to password seamlessly without blocking
+                                        }
+                                    }
+                                )
+                                val promptInfo = androidx.biometric.BiometricPrompt.PromptInfo.Builder()
+                                    .setTitle("Unlock Vault")
+                                    .setSubtitle("Authenticate to decrypt your vault items")
+                                    .setNegativeButtonText("Use Master Password")
+                                    .build()
+                                prompt.authenticate(promptInfo, androidx.biometric.BiometricPrompt.CryptoObject(cipher))
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    androidx.compose.material3.Icon(
+                        Icons.Filled.Lock,
+                        contentDescription = null
+                    )
+                    androidx.compose.foundation.layout.Spacer(modifier = Modifier.width(8.dp))
+                    Text("Unlock with Biometrics")
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
             Button(
                 onClick = { authViewModel.unlockVault(onUnlockSuccess) },
                 enabled = !uiState.isLoading,
@@ -105,7 +154,7 @@ fun UnlockScreen(
                 if (uiState.isLoading) {
                     CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.height(18.dp))
                 } else {
-                    Text("Unlock Vault")
+                    Text("Unlock with Master Password")
                 }
             }
 
