@@ -30,6 +30,7 @@ open class KeyStoreManager(private val context: Context? = null) {
         private const val PREF_KDF_SALT = "kdf_salt"
         private const val PREF_AUTO_LOCK_MINUTES = "auto_lock_minutes"
         private const val PREF_CLIPBOARD_CLEAR_SECONDS = "clipboard_clear_seconds"
+        private const val PREF_AUTOFILL_ENABLED = "autofill_enabled"
     }
 
     private val inMemoryFallback = mutableMapOf<String, Any>()
@@ -200,5 +201,13 @@ open class KeyStoreManager(private val context: Context? = null) {
         set(value) {
             prefs?.edit()?.putInt(PREF_CLIPBOARD_CLEAR_SECONDS, value)?.apply()
             inMemoryFallback[PREF_CLIPBOARD_CLEAR_SECONDS] = value
+        }
+
+    open var isAutofillEnabled: Boolean
+        get() = prefs?.getBoolean(PREF_AUTOFILL_ENABLED, false)
+            ?: (inMemoryFallback[PREF_AUTOFILL_ENABLED] as? Boolean ?: false)
+        set(value) {
+            prefs?.edit()?.putBoolean(PREF_AUTOFILL_ENABLED, value)?.apply()
+            inMemoryFallback[PREF_AUTOFILL_ENABLED] = value
         }
 }

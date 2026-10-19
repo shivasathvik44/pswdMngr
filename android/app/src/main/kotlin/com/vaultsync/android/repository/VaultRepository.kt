@@ -238,6 +238,12 @@ class VaultRepository(
         keyStoreManager.clipboardClearSeconds = seconds
     }
 
+    fun isAutofillEnabled(): Boolean = keyStoreManager.isAutofillEnabled
+
+    fun setAutofillEnabled(enabled: Boolean) {
+        keyStoreManager.isAutofillEnabled = enabled
+    }
+
     suspend fun checkHealth(): HealthResponse {
         return api.checkHealth()
     }

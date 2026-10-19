@@ -18,7 +18,8 @@ data class SettingsUiState(
     val successMessage: String? = null,
     val showChangeAccountPasswordDialog: Boolean = false,
     val showRotateMasterPasswordDialog: Boolean = false,
-    val isBiometricEnabled: Boolean = false
+    val isBiometricEnabled: Boolean = false,
+    val isAutofillEnabled: Boolean = false
 )
 
 class SettingsViewModel(
@@ -31,7 +32,8 @@ class SettingsViewModel(
             username = repository.sessionState.value.username ?: "",
             autoLockTimeoutMinutes = repository.getAutoLockTimeoutMinutes(),
             clipboardTimeoutSeconds = repository.getClipboardTimeoutSeconds(),
-            isBiometricEnabled = if (repository.accountId.isNotBlank()) repository.biometricKeyManager.isBiometricEnabled(repository.accountId) else false
+            isBiometricEnabled = if (repository.accountId.isNotBlank()) repository.biometricKeyManager.isBiometricEnabled(repository.accountId) else false,
+            isAutofillEnabled = repository.isAutofillEnabled()
         )
     )
     val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
@@ -184,5 +186,13 @@ class SettingsViewModel(
                 successMessage = "Biometric unlock disabled"
             )
         }
+    }
+
+    fun updateAutofillEnabled(enabled: Boolean) {
+        repository.setAutofillEnabled(enabled)
+        _uiState.value = _uiState.value.copy(
+            isAutofillEnabled = enabled,
+            successMessage = if (enabled) "VaultSync Autofill enabled" else "VaultSync Autofill disabled"
+        )
     }
 }
