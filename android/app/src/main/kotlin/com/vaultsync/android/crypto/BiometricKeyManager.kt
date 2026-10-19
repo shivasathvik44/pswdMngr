@@ -72,9 +72,19 @@ open class BiometricKeyManager(
         context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
 
-    fun getAlias(accountId: String): String = "$KEY_ALIAS_PREFIX$accountId"
+    fun validateAccountId(accountId: String) {
+        require(accountId.isNotBlank()) { "AccountId must not be blank" }
+        require(accountId.length <= 128) { "AccountId exceeds maximum length of 128 characters" }
+        require(accountId.matches(Regex("^[a-zA-Z0-9_-]+$"))) { "AccountId contains invalid characters: $accountId" }
+    }
+
+    fun getAlias(accountId: String): String {
+        validateAccountId(accountId)
+        return "$KEY_ALIAS_PREFIX$accountId"
+    }
 
     fun getAad(accountId: String): ByteArray {
+        validateAccountId(accountId)
         return "$AAD_PREFIX$accountId".toByteArray(StandardCharsets.UTF_8)
     }
 
@@ -85,23 +95,44 @@ open class BiometricKeyManager(
     // Keystore Key Lifecycle
     // ------------------------------------------------------------------------
 
-    open fun getOrCreateBiometricKey(accountId: String): SecretKey {
-        require(accountId.isNotBlank()) { "AccountId must not be blank" }
+    open fun getBiometricKey(accountId: String): SecretKey? {
+        validateAccountId(accountId)
         val alias = getAlias(accountId)
 
         if (!isAndroidKeyStoreAvailable) {
-            return inMemoryKeys.getOrPut(alias) {
-                val keyBytes = ByteArray(32).also { SecureRandom().nextBytes(it) }
-                SecretKeySpec(keyBytes, "AES")
-            }
+            return inMemoryKeys[alias]
         }
 
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-        if (keyStore.containsAlias(alias)) {
-            val entry = keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry
-            if (entry != null) {
-                return entry.secretKey
+        if (!keyStore.containsAlias(alias)) {
+            return null
+        }
+        val entry = keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry
+        return entry?.secretKey
+    }
+
+    open fun createBiometricKey(accountId: String): SecretKey {
+        validateAccountId(accountId)
+        val alias = getAlias(accountId)
+
+        // Delete any prior key entry to ensure clean enrollment and prevent KeyPermanentlyInvalidatedException lockout
+        try {
+            if (isAndroidKeyStoreAvailable) {
+                val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+                if (keyStore.containsAlias(alias)) {
+                    keyStore.deleteEntry(alias)
+                }
+            } else {
+                inMemoryKeys.remove(alias)
             }
+        } catch (_: Exception) {
+        }
+
+        if (!isAndroidKeyStoreAvailable) {
+            val keyBytes = ByteArray(32).also { SecureRandom().nextBytes(it) }
+            val key = SecretKeySpec(keyBytes, "AES")
+            inMemoryKeys[alias] = key
+            return key
         }
 
         val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
@@ -122,8 +153,13 @@ open class BiometricKeyManager(
         return keyGenerator.generateKey()
     }
 
+    open fun getOrCreateBiometricKey(accountId: String): SecretKey {
+        return getBiometricKey(accountId) ?: createBiometricKey(accountId)
+    }
+
     open fun deleteBiometricKey(accountId: String) {
         if (accountId.isBlank()) return
+        validateAccountId(accountId)
         val alias = getAlias(accountId)
 
         try {
@@ -153,6 +189,7 @@ open class BiometricKeyManager(
 
     open fun hasBiometricKey(accountId: String): Boolean {
         if (accountId.isBlank()) return false
+        validateAccountId(accountId)
         val alias = getAlias(accountId)
         return if (isAndroidKeyStoreAvailable) {
             try {
@@ -166,18 +203,47 @@ open class BiometricKeyManager(
         }
     }
 
+    open fun getKeySecurityLevel(accountId: String): String {
+        validateAccountId(accountId)
+        if (!isAndroidKeyStoreAvailable) {
+            return "IN_MEMORY_SOFTWARE"
+        }
+        val alias = getAlias(accountId)
+        return try {
+            val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+            val key = (keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.secretKey
+                ?: return "KEY_NOT_FOUND"
+            val factory = javax.crypto.SecretKeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER)
+            val keyInfo = factory.getKeySpec(key, android.security.keystore.KeyInfo::class.java) as android.security.keystore.KeyInfo
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                when (keyInfo.securityLevel) {
+                    KeyProperties.SECURITY_LEVEL_STRONGBOX -> "STRONGBOX"
+                    KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT -> "TEE"
+                    KeyProperties.SECURITY_LEVEL_SOFTWARE -> "SOFTWARE"
+                    else -> "UNKNOWN"
+                }
+            } else {
+                if (keyInfo.isInsideSecureHardware) "TEE" else "SOFTWARE"
+            }
+        } catch (e: Exception) {
+            "UNVERIFIED (${e.message})"
+        }
+    }
+
     // ------------------------------------------------------------------------
     // Cipher Initialization for BiometricPrompt CryptoObject
     // ------------------------------------------------------------------------
 
     open fun initEncryptCipher(accountId: String): Cipher {
-        val secretKey = getOrCreateBiometricKey(accountId)
+        validateAccountId(accountId)
+        val secretKey = createBiometricKey(accountId)
         val cipher = Cipher.getInstance(CIPHER_TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey)
         return cipher
     }
 
     open fun initDecryptCipher(accountId: String): Cipher {
+        validateAccountId(accountId)
         val envelope = getBiometricEnvelope(accountId)
             ?: throw BiometricException("No biometric envelope found for account $accountId")
 
@@ -192,9 +258,12 @@ open class BiometricKeyManager(
         }
 
         val secretKey = try {
-            getOrCreateBiometricKey(accountId)
+            getBiometricKey(accountId)
+                ?: throw BiometricException("No biometric key found in keystore for account $accountId")
+        } catch (e: BiometricException) {
+            throw e
         } catch (e: Exception) {
-            if (e is KeyPermanentlyInvalidatedException) {
+            if (e is KeyPermanentlyInvalidatedException || e.cause is KeyPermanentlyInvalidatedException) {
                 deleteBiometricKey(accountId)
                 throw BiometricKeyInvalidatedException(cause = e)
             }
@@ -223,7 +292,7 @@ open class BiometricKeyManager(
     // ------------------------------------------------------------------------
 
     open fun wrapVek(authenticatedCipher: Cipher, accountId: String, vek: ByteArray): BiometricWrappedKeyEnvelope {
-        require(accountId.isNotBlank()) { "AccountId must not be blank" }
+        validateAccountId(accountId)
         if (vek.size != VEK_SIZE_BYTES) {
             throw InvalidParameterException("VEK must be exactly $VEK_SIZE_BYTES bytes, got ${vek.size}")
         }
@@ -254,7 +323,7 @@ open class BiometricKeyManager(
     }
 
     open fun unwrapVek(authenticatedCipher: Cipher, accountId: String): ByteArray {
-        require(accountId.isNotBlank()) { "AccountId must not be blank" }
+        validateAccountId(accountId)
         val envelope = getBiometricEnvelope(accountId)
             ?: throw BiometricException("No biometric envelope stored for account $accountId")
 
@@ -299,6 +368,7 @@ open class BiometricKeyManager(
     // ------------------------------------------------------------------------
 
     open fun saveBiometricEnvelope(envelope: BiometricWrappedKeyEnvelope) {
+        validateAccountId(envelope.accountId)
         val jsonStr = jsonHelper.encodeToString(envelope)
         val key = "bio_env_${envelope.accountId}"
         val p = prefs
@@ -311,6 +381,7 @@ open class BiometricKeyManager(
 
     open fun getBiometricEnvelope(accountId: String): BiometricWrappedKeyEnvelope? {
         if (accountId.isBlank()) return null
+        validateAccountId(accountId)
         val key = "bio_env_$accountId"
         val jsonStr = prefs?.getString(key, null) ?: inMemoryFallback[key] ?: return null
         return try {
@@ -322,6 +393,7 @@ open class BiometricKeyManager(
 
     open fun isBiometricEnabled(accountId: String): Boolean {
         if (accountId.isBlank()) return false
+        validateAccountId(accountId)
         val key = "bio_enabled_$accountId"
         val isExplicitlyEnabled = prefs?.getBoolean(key, false)
             ?: (inMemoryFallback[key]?.toBoolean() ?: false)
@@ -330,6 +402,7 @@ open class BiometricKeyManager(
 
     open fun setBiometricEnabled(accountId: String, enabled: Boolean) {
         if (accountId.isBlank()) return
+        validateAccountId(accountId)
         val key = "bio_enabled_$accountId"
         if (enabled) {
             prefs?.edit()?.putBoolean(key, true)?.apply()

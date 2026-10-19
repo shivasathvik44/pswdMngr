@@ -258,4 +258,110 @@ class VaultRepositoryBiometricTest {
         repository.unlockVault(masterPassword)
         assertTrue(repository.sessionState.value.isUnlocked)
     }
+
+    @Test
+    fun testBiometricUnlock_fencedBySessionGeneration(): Unit = runBlocking {
+        repository.login("alice", accountPassword)
+        repository.unlockVault(masterPassword)
+
+        val encryptCipher = biometricKeyManager.initEncryptCipher("acc-alice")
+        repository.enableBiometricUnlock(encryptCipher)
+        repository.lock()
+
+        val capturedSessionGen = repository.sessionGeneration
+        val decryptCipher = biometricKeyManager.initDecryptCipher("acc-alice")
+        val unwrappedVek = biometricKeyManager.unwrapVek(decryptCipher, "acc-alice")
+
+        // Trigger session invalidation (logout)
+        repository.logout()
+        assertTrue(repository.sessionGeneration > capturedSessionGen)
+
+        // Stale unlockWithVek must be rejected and vek cleared
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking {
+                repository.unlockWithVek(
+                    vek = unwrappedVek,
+                    expectedAccountId = "acc-alice",
+                    expectedSessionGen = capturedSessionGen
+                )
+            }
+        }
+        assertFalse(repository.sessionState.value.isUnlocked)
+        // Verify VEK was zeroized
+        assertTrue(unwrappedVek.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun testBiometricUnlock_fencedByAccountMismatch(): Unit = runBlocking {
+        repository.login("alice", accountPassword)
+        repository.unlockVault(masterPassword)
+
+        val encryptCipher = biometricKeyManager.initEncryptCipher("acc-alice")
+        repository.enableBiometricUnlock(encryptCipher)
+        repository.lock()
+
+        val decryptCipher = biometricKeyManager.initDecryptCipher("acc-alice")
+        val aliceVek = biometricKeyManager.unwrapVek(decryptCipher, "acc-alice")
+
+        // Switch to Bob
+        repository.logout()
+        fakeApi.accountIdToReturn = "acc-bob"
+        val bobVek = VaultCrypto.generateVaultKey()
+        val (bobSalt, bobEnv) = VaultCrypto.wrapVaultKey(bobVek, "BobMasterPass123!")
+        fakeApi.kdfSaltToReturn = Base64.getEncoder().encodeToString(bobSalt)
+        fakeApi.wrappedVaultKeyToReturn = VaultCrypto.serializeWrappedKeyEnvelope(bobEnv)
+        repository.login("bob", "BobAccountPass123!")
+        assertEquals("acc-bob", repository.accountId)
+
+        // Attempting to unlock Bob's vault with Alice's expected account fails
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking {
+                repository.unlockWithVek(
+                    vek = aliceVek,
+                    expectedAccountId = "acc-alice",
+                    expectedSessionGen = null
+                )
+            }
+        }
+        assertFalse(repository.sessionState.value.isUnlocked)
+        // Verify VEK was zeroized
+        assertTrue(aliceVek.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun testAuthViewModel_fencesStalePromptOnAccountSwitch(): Unit = runBlocking {
+        val authViewModel = com.vaultsync.android.ui.viewmodel.AuthViewModel(repository)
+        repository.login("alice", accountPassword)
+        repository.unlockVault(masterPassword)
+
+        val encryptCipher = biometricKeyManager.initEncryptCipher("acc-alice")
+        repository.enableBiometricUnlock(encryptCipher)
+        repository.lock()
+
+        // Alice opens biometric prompt
+        val cipher = authViewModel.getBiometricDecryptCipher()
+        assertNotNull(cipher)
+
+        // In another thread/action, Alice logs out and Bob logs in
+        repository.logout()
+        fakeApi.accountIdToReturn = "acc-bob"
+        val bobVek = VaultCrypto.generateVaultKey()
+        val (bobSalt, bobEnv) = VaultCrypto.wrapVaultKey(bobVek, "BobMasterPass123!")
+        fakeApi.kdfSaltToReturn = Base64.getEncoder().encodeToString(bobSalt)
+        fakeApi.wrappedVaultKeyToReturn = VaultCrypto.serializeWrappedKeyEnvelope(bobEnv)
+        repository.login("bob", "BobAccountPass123!")
+
+        // Now Alice's prompt completes
+        var successCalled = false
+        authViewModel.unlockWithBiometrics(cipher!!) {
+            successCalled = true
+        }
+
+        // Give coroutine a moment to complete
+        kotlinx.coroutines.delay(100)
+
+        assertFalse(successCalled)
+        assertFalse(repository.sessionState.value.isUnlocked)
+        assertNotNull(authViewModel.uiState.value.errorMessage)
+    }
 }

@@ -81,7 +81,13 @@ class BiometricKeyManagerTest {
             biometricKeyManager.initDecryptCipher(accountBob)
         }
 
-        // Even if Bob uses Alice's envelope, AAD mismatch causes AEADBadTagException / DecryptionFailedException
+        // Now Bob enrolls his own biometric key
+        val bobVek = generateVek()
+        val encryptCipherBob = biometricKeyManager.initEncryptCipher(accountBob)
+        biometricKeyManager.wrapVek(encryptCipherBob, accountBob, bobVek)
+        assertTrue(biometricKeyManager.isBiometricEnabled(accountBob))
+
+        // Even if Bob's envelope is swapped with Alice's ciphertext, AAD and key mismatch causes AEADBadTagException / DecryptionFailedException
         val aliceEnvelope = biometricKeyManager.getBiometricEnvelope(accountAlice)!!
         val bobEnvelopeWithAliceCiphertext = aliceEnvelope.copy(accountId = accountBob)
         biometricKeyManager.saveBiometricEnvelope(bobEnvelopeWithAliceCiphertext)
@@ -191,5 +197,99 @@ class BiometricKeyManagerTest {
     fun testBiometricAvailabilityReporting() {
         val status = biometricKeyManager.checkBiometricAvailability(context)
         assertNotNull(status)
+    }
+
+    @Test
+    fun testAccountIdValidation_rejectsBlankOversizedAndMalformed() {
+        // Blank
+        assertThrows(IllegalArgumentException::class.java) {
+            biometricKeyManager.validateAccountId("")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            biometricKeyManager.validateAccountId("   ")
+        }
+
+        // Oversized (> 128 chars)
+        val oversized = "a".repeat(129)
+        assertThrows(IllegalArgumentException::class.java) {
+            biometricKeyManager.validateAccountId(oversized)
+        }
+
+        // Malformed with delimiters, control chars, path traversal
+        assertThrows(IllegalArgumentException::class.java) {
+            biometricKeyManager.validateAccountId("acc/sub/id")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            biometricKeyManager.validateAccountId("../etc/passwd")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            biometricKeyManager.validateAccountId("user name with spaces")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            biometricKeyManager.validateAccountId("user;drop table accounts;")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            biometricKeyManager.validateAccountId("user\u0000id")
+        }
+
+        // Valid account IDs
+        biometricKeyManager.validateAccountId("9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d")
+        biometricKeyManager.validateAccountId("acc-alice_01")
+        biometricKeyManager.validateAccountId("a".repeat(128))
+    }
+
+    @Test
+    fun testReEnrollment_replacesExistingKeyCleanly() {
+        val accountId = "re_enroll_acc"
+        val vek1 = generateVek()
+        val cipher1 = biometricKeyManager.initEncryptCipher(accountId)
+        val env1 = biometricKeyManager.wrapVek(cipher1, accountId, vek1)
+        assertNotNull(env1)
+
+        val decryptCipher1 = biometricKeyManager.initDecryptCipher(accountId)
+        val unwrapped1 = biometricKeyManager.unwrapVek(decryptCipher1, accountId)
+        assertArrayEquals(vek1, unwrapped1)
+
+        // Re-enroll with a new VEK
+        val vek2 = generateVek()
+        val cipher2 = biometricKeyManager.initEncryptCipher(accountId)
+        val env2 = biometricKeyManager.wrapVek(cipher2, accountId, vek2)
+        assertNotNull(env2)
+
+        val decryptCipher2 = biometricKeyManager.initDecryptCipher(accountId)
+        val unwrapped2 = biometricKeyManager.unwrapVek(decryptCipher2, accountId)
+        assertArrayEquals(vek2, unwrapped2)
+    }
+
+    @Test
+    fun testMissingKeyDuringDecryption_throwsBiometricException() {
+        val accountId = "missing_key_acc"
+        val vek = generateVek()
+        val cipher = biometricKeyManager.initEncryptCipher(accountId)
+        val env = biometricKeyManager.wrapVek(cipher, accountId, vek)
+        assertNotNull(env)
+
+        // Force delete only the key (keeping envelope)
+        val alias = biometricKeyManager.getAlias(accountId)
+        val field = BiometricKeyManager::class.java.getDeclaredField("inMemoryKeys").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        (field.get(biometricKeyManager) as MutableMap<String, javax.crypto.SecretKey>).remove(alias)
+
+        // Decryption should throw BiometricException without creating a new random key
+        val ex = assertThrows(BiometricException::class.java) {
+            biometricKeyManager.initDecryptCipher(accountId)
+        }
+        assertTrue(ex.message!!.contains("No biometric key found"))
+    }
+
+    @Test
+    fun testKeySecurityLevelReporting() {
+        val accountId = "sec_level_acc"
+        val cipher = biometricKeyManager.initEncryptCipher(accountId)
+        biometricKeyManager.wrapVek(cipher, accountId, generateVek())
+
+        val level = biometricKeyManager.getKeySecurityLevel(accountId)
+        assertNotNull(level)
+        assertTrue(level.isNotBlank())
     }
 }

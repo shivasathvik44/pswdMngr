@@ -188,19 +188,31 @@ class AuthViewModel(
         return repository.isBiometricUnlockAvailable()
     }
 
+    private var biometricPromptAccountId: String? = null
+    private var biometricPromptSessionGen: Long? = null
+
     fun getBiometricDecryptCipher(): javax.crypto.Cipher? {
         val accId = repository.accountId
         if (accId.isBlank() || !repository.biometricKeyManager.isBiometricEnabled(accId)) {
+            biometricPromptAccountId = null
+            biometricPromptSessionGen = null
             return null
         }
         return try {
-            repository.biometricKeyManager.initDecryptCipher(accId)
+            val cipher = repository.biometricKeyManager.initDecryptCipher(accId)
+            biometricPromptAccountId = accId
+            biometricPromptSessionGen = repository.sessionGeneration
+            cipher
         } catch (e: com.vaultsync.android.crypto.BiometricKeyInvalidatedException) {
+            biometricPromptAccountId = null
+            biometricPromptSessionGen = null
             _uiState.value = _uiState.value.copy(
                 errorMessage = "Biometric credentials have changed. Please unlock using your Master Password to re-enable biometrics."
             )
             null
         } catch (e: Exception) {
+            biometricPromptAccountId = null
+            biometricPromptSessionGen = null
             _uiState.value = _uiState.value.copy(
                 errorMessage = "Failed to initialize biometric unlock: ${e.message}"
             )
@@ -209,13 +221,17 @@ class AuthViewModel(
     }
 
     fun unlockWithBiometrics(authenticatedCipher: javax.crypto.Cipher, onSuccess: () -> Unit) {
+        val targetAccountId = biometricPromptAccountId ?: repository.accountId
+        val targetSessionGen = biometricPromptSessionGen ?: repository.sessionGeneration
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
             try {
-                val accId = repository.accountId
-                val vek = repository.biometricKeyManager.unwrapVek(authenticatedCipher, accId)
+                if (targetAccountId.isBlank() || targetAccountId != repository.accountId || targetSessionGen != repository.sessionGeneration) {
+                    throw IllegalStateException("Session changed or invalidated during biometric authentication")
+                }
+                val vek = repository.biometricKeyManager.unwrapVek(authenticatedCipher, targetAccountId)
                 try {
-                    repository.unlockWithVek(vek)
+                    repository.unlockWithVek(vek, targetAccountId, targetSessionGen)
                     _uiState.value = _uiState.value.copy(isLoading = false, masterPassword = "")
                     onSuccess()
                 } catch (e: Exception) {

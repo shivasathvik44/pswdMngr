@@ -554,7 +554,11 @@ class VaultRepository(
         _sessionState.update { it.copy(isBiometricEnabled = false) }
     }
 
-    suspend fun unlockWithVek(vek: ByteArray) {
+    suspend fun unlockWithVek(
+        vek: ByteArray,
+        expectedAccountId: String? = null,
+        expectedSessionGen: Long? = null
+    ) {
         require(vek.size == 32) { "Invalid VEK size: ${vek.size}" }
         val currentLockGen: Long
         val currentSessionGen: Long
@@ -563,6 +567,14 @@ class VaultRepository(
             if (!_sessionState.value.isAuthenticated || accountId.isBlank()) {
                 VaultCrypto.clearBytes(vek)
                 throw IllegalStateException("Session not authenticated")
+            }
+            if (expectedAccountId != null && accountId != expectedAccountId) {
+                VaultCrypto.clearBytes(vek)
+                throw IllegalStateException("Account mismatch during biometric unlock: expected $expectedAccountId, got $accountId")
+            }
+            if (expectedSessionGen != null && sessionGeneration != expectedSessionGen) {
+                VaultCrypto.clearBytes(vek)
+                throw IllegalStateException("Session generation mismatch during biometric unlock: expected $expectedSessionGen, got $sessionGeneration")
             }
             lockGeneration++
             currentLockGen = lockGeneration
