@@ -1,6 +1,6 @@
 # VaultSync
 
-> **Status:** Under active development — Android biometric unlock implemented; security verification and end-to-end integration remain in progress.
+> **Status:** Under active development — Android ANR remediation implemented and staging APK prepared; physical-device validation is pending.
 
 [![Tests](https://github.com/vaultsync/vaultsync/actions/workflows/tests.yml/badge.svg)](https://github.com/vaultsync/vaultsync/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -18,6 +18,7 @@ The project prioritizes client-side encryption, separation of account authentica
 ## Table of Contents
 
 - [Key Features](#key-features)
+- [Current Development Status](#current-development-status)
 - [Security Architecture](#security-architecture)
 - [Cryptography](#cryptography)
 - [Application Architecture](#application-architecture)
@@ -32,6 +33,63 @@ The project prioritizes client-side encryption, separation of account authentica
 - [Security Limitations](#security-limitations)
 - [Contributing](#contributing)
 - [License](#license)
+
+---
+
+## Current Development Status
+
+The latest reported Android development work focused on resolving application-not-responding (ANR) freezes during vault unlock and immediately afterward.
+
+| Milestone | Status |
+|---|---|
+| Backend foundation and security headers | Implemented |
+| Argon2id/AES-GCM cryptographic prototype | Implemented |
+| Separate account and vault credentials | Implemented |
+| Fedora desktop application foundation | Implemented |
+| Android offline persistence and biometric unlock | Implemented; physical-device verification remains pending |
+| Phase 8.2.3 — Android ANR remediation | Changes implemented; physical-device validation pending |
+| Phase 8.3 — Pre-validation audit and backend test readiness | Pending |
+| End-to-end Android/Fedora synchronization over a private network | Still requires integration validation |
+
+### Phase 8.2.3 — Android ANR remediation
+
+The latest development report says the following changes were made:
+
+- Moved expensive Argon2id key derivation and key-wrapping work off the Android main thread.
+- Moved database and network operations to background dispatchers.
+- Reduced the duration of the VEK synchronization lock.
+- Added cleanup for vault keys when unlocking fails.
+- Improved coroutine cancellation and duplicate-action handling.
+- Added synchronization-job deduplication.
+- Reworked the autofill authentication flow to avoid blocking the main thread.
+- Added ANR regression tests.
+
+**Reported results:** 6 focused ANR regression tests passed and the full Android unit-test suite reported 123 passing tests. APK ZIP integrity and signature verification were also reported as passing. These results have not yet been confirmed by physical-device testing, so the ANR fix is not considered fully validated.
+
+The reported staging APK is:
+
+```text
+/home/capslock/.local/share/vaultsync-build/staging/android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+Reported SHA-256:
+
+```text
+eb8d9acb4a1a3066fa6ed4b9cf6f8972e98aeb024dd225351a06a6a4c6b9d700
+```
+
+Recheck the checksum, package identity, and signing details before installing the staging APK. Preserve the original APK and primary database during testing.
+
+### Next validation steps
+
+- [ ] Review the ANR fixes and VEK lifecycle/concurrency handling in the source.
+- [ ] Confirm the regression tests cover the original freeze paths.
+- [ ] Investigate the `auth_rate_limits` SQLite schema error using an isolated test database.
+- [ ] Reverify the staging APK checksum and package/signature identity.
+- [ ] Install and test the staging APK on the physical Android device without clearing app data.
+- [ ] Measure unlock time and check for freezes during vault loading and synchronization.
+- [ ] Test lock/unlock, repeated interactions, biometric behavior, and backend connectivity.
+- [ ] Inspect Android logs for ANRs and exceptions without exposing secrets.
 
 ---
 
@@ -386,7 +444,7 @@ QT_QPA_PLATFORM=offscreen .venv/bin/pytest desktop/tests -v
 
 ### Reported validation snapshot
 
-The Phase 8.1 development report recorded the following results:
+An earlier Phase 8.1 development report recorded the following historical results:
 
 | Component | Reported tests passed |
 |---|---:|
@@ -439,12 +497,14 @@ The project has progressed beyond the initial backend and desktop milestones. Th
 - [x] **Phase 8.0 — Offline Persistence:** Local encrypted record envelopes, synchronization state, and offline reload workflows.
 - [x] **Phase 8.1 — Biometric Unlock Implementation:** Android Keystore-based VEK wrapping, BiometricPrompt integration, account-bound AAD, and automated tests.
 - [ ] **Phase 8.1.1 — Biometric Security Verification:** Audit key invalidation semantics, hardware-backed key claims, account isolation, and lifecycle races; fix any verified issues.
-- [ ] **Phase 8.2 — Android Autofill:** Secure AutofillService integration, user consent, and authentication-gated credential filling.
+- [x] **Phase 8.2.3 — Android ANR Remediation:** Background dispatchers, cancellation/deduplication improvements, key cleanup, and regression tests implemented; physical-device verification remains pending.
+- [ ] **Phase 8.3 — Pre-Validation Audit:** Review concurrency/key lifecycle, test quality, isolated backend schema/migration behavior, and staging artifact identity.
+- [ ] **Phase 8.2 — Android Autofill:** Complete and validate secure AutofillService integration, user consent, and authentication-gated credential filling.
 - [ ] **Phase 9 — End-to-End Integration:** Verify synchronization between Android and Fedora over Tailscale/WireGuard.
 - [ ] **Phase 10 — Deployment and Recovery Hardening:** systemd restrictions, backup/restore drills, operational documentation, and security review.
 - [ ] **Release Readiness:** Device-level testing, threat-model review, dependency review, and independent security assessment.
 
-Roadmap checkmarks describe implementation milestones, not a certification that the project is secure for production use.
+Roadmap checkmarks describe implementation milestones, not a certification that the project is secure for production use. In particular, Phase 8.2.3 is not considered validated until the staging build has been tested on a physical Android device.
 
 ---
 
