@@ -10,6 +10,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vaultsync.android.model.VaultItem
 import com.vaultsync.android.repository.VaultRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,6 +41,7 @@ class VaultViewModel(
 
     private val _items = repository.items
     private var clipboardClearJob: Job? = null
+    private var syncJob: Job? = null
 
     val filteredItems: StateFlow<List<VaultItem>> = combine(_items, _uiState) { items, state ->
         if (state.searchQuery.isBlank()) {
@@ -86,16 +88,22 @@ class VaultViewModel(
     }
 
     fun sync() {
-        viewModelScope.launch {
+        if (_uiState.value.isSyncing || syncJob?.isActive == true) return
+        syncJob = viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isSyncing = true, errorMessage = null)
             try {
                 repository.sync()
                 _uiState.value = _uiState.value.copy(isSyncing = false)
+            } catch (e: CancellationException) {
+                _uiState.value = _uiState.value.copy(isSyncing = false)
+                throw e
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     isSyncing = false,
                     errorMessage = e.message ?: "Sync failed"
                 )
+            } finally {
+                syncJob = null
             }
         }
     }

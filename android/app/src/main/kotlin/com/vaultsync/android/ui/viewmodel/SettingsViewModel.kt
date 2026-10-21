@@ -3,6 +3,7 @@ package com.vaultsync.android.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vaultsync.android.repository.VaultRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -61,6 +62,7 @@ class SettingsViewModel(
     }
 
     fun changeAccountPassword(currentPass: String, newPass: String, confirmPass: String) {
+        if (_uiState.value.isLoading) return
         if (currentPass.isEmpty()) {
             _uiState.value = _uiState.value.copy(errorMessage = "Current password is required")
             return
@@ -83,6 +85,9 @@ class SettingsViewModel(
                     showChangeAccountPasswordDialog = false,
                     successMessage = "Account password updated successfully"
                 )
+            } catch (e: CancellationException) {
+                _uiState.value = _uiState.value.copy(isLoading = false)
+                throw e
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
@@ -93,6 +98,7 @@ class SettingsViewModel(
     }
 
     fun rotateMasterPassword(currentMaster: String, newMaster: String, confirmMaster: String) {
+        if (_uiState.value.isLoading) return
         if (currentMaster.isEmpty()) {
             _uiState.value = _uiState.value.copy(errorMessage = "Current master password is required")
             return
@@ -117,6 +123,9 @@ class SettingsViewModel(
                     showRotateMasterPasswordDialog = false,
                     successMessage = "Master password rotated successfully"
                 )
+            } catch (e: CancellationException) {
+                _uiState.value = _uiState.value.copy(isLoading = false)
+                throw e
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
@@ -160,6 +169,7 @@ class SettingsViewModel(
     }
 
     fun enableBiometric(authenticatedCipher: javax.crypto.Cipher) {
+        if (_uiState.value.isLoading) return
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
             try {
@@ -169,6 +179,9 @@ class SettingsViewModel(
                     isBiometricEnabled = true,
                     successMessage = "Biometric unlock enabled successfully"
                 )
+            } catch (e: CancellationException) {
+                _uiState.value = _uiState.value.copy(isLoading = false)
+                throw e
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,

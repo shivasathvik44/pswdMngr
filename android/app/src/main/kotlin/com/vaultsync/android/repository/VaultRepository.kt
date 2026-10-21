@@ -23,12 +23,16 @@ import com.vaultsync.android.model.SessionState
 import com.vaultsync.android.model.VaultItem
 import java.time.Instant
 import javax.crypto.Cipher
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.util.Base64
@@ -46,7 +50,9 @@ class VaultRepository(
     val keyStoreManager: KeyStoreManager,
     val vaultCrypto: VaultCrypto = VaultCrypto,
     val database: VaultDatabase? = null,
-    val biometricKeyManager: BiometricKeyManager = BiometricKeyManager(null)
+    val biometricKeyManager: BiometricKeyManager = BiometricKeyManager(null),
+    val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    val defaultDispatcher: CoroutineDispatcher = Dispatchers.Default
 ) {
 
     private val json = Json {
@@ -244,8 +250,8 @@ class VaultRepository(
         keyStoreManager.isAutofillEnabled = enabled
     }
 
-    suspend fun checkHealth(): HealthResponse {
-        return api.checkHealth()
+    suspend fun checkHealth(): HealthResponse = withContext(ioDispatcher) {
+        api.checkHealth()
     }
 
     // ------------------------------------------------------------------------
@@ -327,13 +333,17 @@ class VaultRepository(
         }
         try {
             if (_sessionState.value.isAuthenticated) {
-                api.logout()
+                withContext(ioDispatcher) {
+                    api.logout()
+                }
             }
         } catch (_: Exception) {
             // Best effort network revocation
         } finally {
             try {
-                keyStoreManager.clearSessionToken()
+                withContext(ioDispatcher) {
+                    keyStoreManager.clearSessionToken()
+                }
             } catch (_: Exception) {
                 // Best effort clear
             }
@@ -382,7 +392,9 @@ class VaultRepository(
         val cleanUser = usernameInput.trim()
         val vek = VaultCrypto.generateVaultKey()
         try {
-            val (saltBytes, envelope) = VaultCrypto.wrapVaultKey(vek, vaultMasterPasswordInput)
+            val (saltBytes, envelope) = withContext(defaultDispatcher) {
+                VaultCrypto.wrapVaultKey(vek, vaultMasterPasswordInput)
+            }
             val saltBase64 = Base64.getEncoder().encodeToString(saltBytes)
             val envelopeJson = json.encodeToString(envelope)
 
@@ -392,7 +404,9 @@ class VaultRepository(
                 kdfSalt = saltBase64,
                 wrappedVaultKey = envelopeJson
             )
-            api.register(req)
+            withContext(ioDispatcher) {
+                api.register(req)
+            }
         } finally {
             VaultCrypto.clearBytes(vek)
         }
@@ -414,7 +428,9 @@ class VaultRepository(
             accountPassword = accountPasswordInput,
             deviceName = deviceName
         )
-        val res = api.login(req)
+        val res = withContext(ioDispatcher) {
+            api.login(req)
+        }
 
         synchronized(keyLock) {
             if (sessionGeneration != capturedSessionGen) {
@@ -427,11 +443,13 @@ class VaultRepository(
         }
 
         try {
-            keyStoreManager.saveSessionToken(res.sessionToken)
-            keyStoreManager.lastUsername = cleanUser
-            keyStoreManager.lastAccountId = res.accountId
-            keyStoreManager.lastWrappedVaultKey = res.wrappedVaultKey
-            keyStoreManager.lastKdfSalt = res.kdfSalt
+            withContext(ioDispatcher) {
+                keyStoreManager.saveSessionToken(res.sessionToken)
+                keyStoreManager.lastUsername = cleanUser
+                keyStoreManager.lastAccountId = res.accountId
+                keyStoreManager.lastWrappedVaultKey = res.wrappedVaultKey
+                keyStoreManager.lastKdfSalt = res.kdfSalt
+            }
         } catch (e: SecureStorageException) {
             lock()
             api.sessionToken = null
@@ -489,11 +507,13 @@ class VaultRepository(
     }
 
     suspend fun unlockVault(vaultMasterPasswordInput: String) {
-        val envelopeString = wrappedVaultKey
+        val envelopeString = synchronized(keyLock) { wrappedVaultKey }
             ?: throw IllegalStateException("No wrapped vault key available for this account")
 
         val envelope = json.decodeFromString<WrappedKeyEnvelope>(envelopeString)
-        val vek = VaultCrypto.unwrapVaultKey(envelope, vaultMasterPasswordInput)
+        val vek = withContext(defaultDispatcher) {
+            VaultCrypto.unwrapVaultKey(envelope, vaultMasterPasswordInput)
+        }
 
         val currentLockGen: Long
         val currentSessionGen: Long
@@ -512,8 +532,31 @@ class VaultRepository(
             )
         }
 
-        // Load offline cached records immediately so vault is immediately usable without network
-        loadCachedRecordsFromDb(currentLockGen, currentSessionGen)
+        try {
+            // Load offline cached records immediately on ioDispatcher
+            loadCachedRecordsFromDb(currentLockGen, currentSessionGen)
+        } catch (t: Throwable) {
+            synchronized(keyLock) {
+                if (lockGeneration == currentLockGen && sessionGeneration == currentSessionGen) {
+                    VaultCrypto.clearBytes(_vaultKey)
+                    _vaultKey = null
+                    _itemsMap.clear()
+                    _corruptedRecords.clear()
+                    _itemsFlow.value = emptyList()
+                    syncCursor = 0
+                    _sessionState.update {
+                        it.copy(
+                            isUnlocked = false,
+                            lockGeneration = currentLockGen.toInt(),
+                            itemCount = 0,
+                            corruptedRecordCount = 0,
+                            syncStatusMessage = "Locked"
+                        )
+                    }
+                }
+            }
+            throw t
+        }
 
         // Then attempt background sync with server
         try {
@@ -595,8 +638,31 @@ class VaultRepository(
             )
         }
 
-        // Load offline cached records immediately so vault is immediately usable without network
-        loadCachedRecordsFromDb(currentLockGen, currentSessionGen)
+        try {
+            // Load offline cached records immediately on ioDispatcher
+            loadCachedRecordsFromDb(currentLockGen, currentSessionGen)
+        } catch (t: Throwable) {
+            synchronized(keyLock) {
+                if (lockGeneration == currentLockGen && sessionGeneration == currentSessionGen) {
+                    VaultCrypto.clearBytes(_vaultKey)
+                    _vaultKey = null
+                    _itemsMap.clear()
+                    _corruptedRecords.clear()
+                    _itemsFlow.value = emptyList()
+                    syncCursor = 0
+                    _sessionState.update {
+                        it.copy(
+                            isUnlocked = false,
+                            lockGeneration = currentLockGen.toInt(),
+                            itemCount = 0,
+                            corruptedRecordCount = 0,
+                            syncStatusMessage = "Locked"
+                        )
+                    }
+                }
+            }
+            throw t
+        }
 
         // Then attempt background sync with server
         try {
@@ -605,10 +671,10 @@ class VaultRepository(
         }
     }
 
-    private suspend fun loadCachedRecordsFromDb(capturedLockGen: Long, capturedSessionGen: Long) {
-        val db = database ?: return
+    private suspend fun loadCachedRecordsFromDb(capturedLockGen: Long, capturedSessionGen: Long) = withContext(ioDispatcher) {
+        val db = database ?: return@withContext
         val accId = synchronized(keyLock) { accountId }
-        if (accId.isBlank()) return
+        if (accId.isBlank()) return@withContext
 
         try {
             val cachedEntities = db.recordDao().getActiveRecords(accId)
@@ -616,7 +682,7 @@ class VaultRepository(
             val cachedCorrupted = mutableMapOf<String, String>()
 
             for (entity in cachedEntities) {
-                if (!isOperationValid(capturedLockGen, capturedSessionGen)) return
+                if (!isOperationValid(capturedLockGen, capturedSessionGen)) return@withContext
 
                 if (entity.ciphertextPayload.isNotBlank()) {
                     try {
@@ -644,7 +710,7 @@ class VaultRepository(
 
             synchronized(keyLock) {
                 if (lockGeneration != capturedLockGen || sessionGeneration != capturedSessionGen || !_sessionState.value.isUnlocked) {
-                    return
+                    return@withContext
                 }
                 _itemsMap.clear()
                 _itemsMap.putAll(cachedItems)
@@ -687,7 +753,8 @@ class VaultRepository(
      * 6. Does not advance syncCursor past failed records, preventing permanent data loss.
      * 7. Publishes replacement state atomically to _itemsMap and _itemsFlow.
      */
-    suspend fun forceFullResync() = mutex.withLock {
+    suspend fun forceFullResync() = withContext(ioDispatcher) {
+        mutex.withLock {
         val gen: Long
         val sessionGen: Long
         synchronized(keyLock) {
@@ -917,10 +984,13 @@ class VaultRepository(
             }
             if (e is AuthenticationException) throw e
         }
+        }
     }
 
-    suspend fun syncRecords() = mutex.withLock {
-        syncRecordsInternal()
+    suspend fun syncRecords() = withContext(ioDispatcher) {
+        mutex.withLock {
+            syncRecordsInternal()
+        }
     }
 
     private suspend fun syncRecordsInternal() {
@@ -1154,10 +1224,12 @@ class VaultRepository(
 
         val isNew = synchronized(keyLock) { !_itemsMap.containsKey(item.id) }
         val res = try {
-            if (isNew) {
-                api.createRecord(CreateRecordRequest(recordId = item.id, ciphertextPayload = envelopeJson))
-            } else {
-                api.updateRecord(item.id, UpdateRecordRequest(expectedRevision = item.revision, ciphertextPayload = envelopeJson))
+            withContext(ioDispatcher) {
+                if (isNew) {
+                    api.createRecord(CreateRecordRequest(recordId = item.id, ciphertextPayload = envelopeJson))
+                } else {
+                    api.updateRecord(item.id, UpdateRecordRequest(expectedRevision = item.revision, ciphertextPayload = envelopeJson))
+                }
             }
         } catch (e: AuthenticationException) {
             handleAuthFailure()
@@ -1173,19 +1245,21 @@ class VaultRepository(
         val accId = synchronized(keyLock) { accountId }
         if (database != null && accId.isNotBlank()) {
             try {
-                database.recordDao().upsertRecord(
-                    EncryptedRecordEntity(
-                        accountId = accId,
-                        recordId = item.id,
-                        revision = res.revision,
-                        syncCursor = res.syncCursor,
-                        isDeleted = false,
-                        ciphertextPayload = envelopeJson,
-                        createdAt = res.createdAt ?: item.createdAt,
-                        updatedAt = res.updatedAt ?: item.updatedAt,
-                        isCorrupted = false
+                withContext(ioDispatcher) {
+                    database.recordDao().upsertRecord(
+                        EncryptedRecordEntity(
+                            accountId = accId,
+                            recordId = item.id,
+                            revision = res.revision,
+                            syncCursor = res.syncCursor,
+                            isDeleted = false,
+                            ciphertextPayload = envelopeJson,
+                            createdAt = res.createdAt ?: item.createdAt,
+                            updatedAt = res.updatedAt ?: item.updatedAt,
+                            isCorrupted = false
+                        )
                     )
-                )
+                }
             } catch (_: Exception) {
                 // Database write failure: fail closed to in-memory state
             }
@@ -1222,7 +1296,9 @@ class VaultRepository(
         onUserActivity()
 
         try {
-            api.deleteRecord(itemId, existing.revision)
+            withContext(ioDispatcher) {
+                api.deleteRecord(itemId, existing.revision)
+            }
         } catch (e: AuthenticationException) {
             handleAuthFailure()
             throw e
@@ -1231,11 +1307,13 @@ class VaultRepository(
         val accId = synchronized(keyLock) { accountId }
         if (database != null && accId.isNotBlank()) {
             try {
-                database.recordDao().markDeleted(
-                    accountId = accId,
-                    recordId = itemId,
-                    updatedAt = Instant.now().toString()
-                )
+                withContext(ioDispatcher) {
+                    database.recordDao().markDeleted(
+                        accountId = accId,
+                        recordId = itemId,
+                        updatedAt = Instant.now().toString()
+                    )
+                }
             } catch (_: Exception) {
                 // Database write failure: fail closed to in-memory state
             }
@@ -1258,7 +1336,7 @@ class VaultRepository(
     // Credentials & Password Rotation
     // ------------------------------------------------------------------------
 
-    suspend fun changeAccountPassword(currentPass: String, newPass: String) {
+    suspend fun changeAccountPassword(currentPass: String, newPass: String) = withContext(ioDispatcher) {
         val req = ChangePasswordRequest(currentPassword = currentPass, newPassword = newPass)
         api.changeAccountPassword(req)
     }
@@ -1281,7 +1359,9 @@ class VaultRepository(
         }
 
         try {
-            val (newSaltBytes, newEnvelope) = VaultCrypto.wrapVaultKey(currentVek, newMasterPassword)
+            val (newSaltBytes, newEnvelope) = withContext(defaultDispatcher) {
+                VaultCrypto.wrapVaultKey(currentVek, newMasterPassword)
+            }
             val newSaltBase64 = Base64.getEncoder().encodeToString(newSaltBytes)
             val newEnvelopeJson = json.encodeToString(newEnvelope)
 
@@ -1292,7 +1372,9 @@ class VaultRepository(
             }
 
             try {
-                api.updateVaultKey(UpdateVaultKeyRequest(wrappedVaultKey = newEnvelopeJson, kdfSalt = newSaltBase64))
+                withContext(ioDispatcher) {
+                    api.updateVaultKey(UpdateVaultKeyRequest(wrappedVaultKey = newEnvelopeJson, kdfSalt = newSaltBase64))
+                }
             } catch (e: AuthenticationException) {
                 handleAuthFailure()
                 throw e
@@ -1305,8 +1387,10 @@ class VaultRepository(
                 wrappedVaultKey = newEnvelopeJson
                 kdfSalt = newSaltBase64
             }
-            keyStoreManager.lastWrappedVaultKey = newEnvelopeJson
-            keyStoreManager.lastKdfSalt = newSaltBase64
+            withContext(ioDispatcher) {
+                keyStoreManager.lastWrappedVaultKey = newEnvelopeJson
+                keyStoreManager.lastKdfSalt = newSaltBase64
+            }
         } finally {
             VaultCrypto.clearBytes(currentVek)
         }

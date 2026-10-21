@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -157,7 +158,10 @@ class AuthRateLimit(Base):
     """Database-backed rate limit event log for multi-worker abuse prevention."""
 
     __tablename__ = "auth_rate_limits"
+    __table_args__ = (
+        Index("ix_auth_rate_limits_id_time", "identifier", "attempt_time"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    identifier: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
-    attempt_time: Mapped[float] = mapped_column(Float, index=True, nullable=False)
+    identifier: Mapped[str] = mapped_column(String(128), nullable=False)
+    attempt_time: Mapped[float] = mapped_column(Float, nullable=False)

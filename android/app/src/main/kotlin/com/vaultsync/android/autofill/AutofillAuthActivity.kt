@@ -47,6 +47,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.lifecycleScope
 import com.vaultsync.android.R
 import com.vaultsync.android.VaultSyncApplication
 import com.vaultsync.android.model.VaultItem
@@ -221,18 +222,18 @@ class AutofillAuthActivity : FragmentActivity() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                     val authCipher = result.cryptoObject?.cipher
                     if (authCipher != null) {
-                        try {
-                            val vek = repository.biometricKeyManager.unwrapVek(authCipher, accId)
+                        lifecycleScope.launch {
                             try {
-                                kotlinx.coroutines.runBlocking {
+                                val vek = repository.biometricKeyManager.unwrapVek(authCipher, accId)
+                                try {
                                     repository.unlockWithVek(vek, expectedAccountId, expectedSessionGen)
+                                    onSuccess()
+                                } finally {
+                                    com.vaultsync.android.crypto.VaultCrypto.clearBytes(vek)
                                 }
-                                onSuccess()
-                            } finally {
-                                com.vaultsync.android.crypto.VaultCrypto.clearBytes(vek)
+                            } catch (e: Exception) {
+                                onError("Biometric unlock failed: ${e.message}")
                             }
-                        } catch (e: Exception) {
-                            onError("Biometric unlock failed: ${e.message}")
                         }
                     } else {
                         onError("Biometric cipher authorization missing")

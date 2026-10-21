@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vaultsync.android.model.SessionState
 import com.vaultsync.android.repository.VaultRepository
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -27,6 +29,8 @@ class AuthViewModel(
 
     private val _uiState = MutableStateFlow(AuthUiState(serverUrl = repository.getServerUrl()))
     val uiState: StateFlow<AuthUiState> = _uiState.asStateFlow()
+
+    private var unlockJob: Job? = null
 
     val sessionState: StateFlow<SessionState> = repository.sessionState
 
@@ -162,10 +166,13 @@ class AuthViewModel(
             _uiState.value = state.copy(errorMessage = "Master password is required")
             return
         }
+        if (_uiState.value.isLoading || unlockJob?.isActive == true) {
+            return
+        }
 
-        viewModelScope.launch {
+        val masterChars = state.masterPassword.toCharArray()
+        unlockJob = viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
-            val masterChars = state.masterPassword.toCharArray()
             try {
                 repository.unlock(masterChars)
                 _uiState.value = _uiState.value.copy(
@@ -173,6 +180,9 @@ class AuthViewModel(
                     masterPassword = ""
                 )
                 onSuccess()
+            } catch (e: CancellationException) {
+                _uiState.value = _uiState.value.copy(isLoading = false)
+                throw e
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
@@ -180,6 +190,7 @@ class AuthViewModel(
                 )
             } finally {
                 masterChars.fill('\u0000')
+                unlockJob = null
             }
         }
     }
@@ -223,7 +234,10 @@ class AuthViewModel(
     fun unlockWithBiometrics(authenticatedCipher: javax.crypto.Cipher, onSuccess: () -> Unit) {
         val targetAccountId = biometricPromptAccountId ?: repository.accountId
         val targetSessionGen = biometricPromptSessionGen ?: repository.sessionGeneration
-        viewModelScope.launch {
+        if (_uiState.value.isLoading || unlockJob?.isActive == true) {
+            return
+        }
+        unlockJob = viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
             try {
                 if (targetAccountId.isBlank() || targetAccountId != repository.accountId || targetSessionGen != repository.sessionGeneration) {
@@ -238,6 +252,9 @@ class AuthViewModel(
                     com.vaultsync.android.crypto.VaultCrypto.clearBytes(vek)
                     throw e
                 }
+            } catch (e: CancellationException) {
+                _uiState.value = _uiState.value.copy(isLoading = false)
+                throw e
             } catch (e: com.vaultsync.android.crypto.BiometricKeyInvalidatedException) {
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
@@ -248,6 +265,8 @@ class AuthViewModel(
                     isLoading = false,
                     errorMessage = e.message ?: "Biometric unlock failed. Please use your Master Password."
                 )
+            } finally {
+                unlockJob = null
             }
         }
     }
