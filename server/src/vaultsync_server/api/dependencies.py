@@ -8,6 +8,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DbSession, joinedload
 
+from vaultsync_server.config import settings
 from vaultsync_server.db.base import get_db
 from vaultsync_server.db.models import Account, Session
 from vaultsync_server.services.auth import hash_token
@@ -73,9 +74,18 @@ async def get_current_session(
             detail="Account is disabled",
         )
 
-    # Touch last_used_at
-    session.last_used_at = now
-    db.commit()
+    # Throttle session last_used_at database writes to reduce SQLite write contention
+    last_used = session.last_used_at
+    if last_used is not None:
+        if last_used.tzinfo is None:
+            last_used = last_used.replace(tzinfo=timezone.utc)
+        elapsed = (now - last_used).total_seconds()
+    else:
+        elapsed = float("inf")
+
+    if elapsed >= settings.session_last_used_update_interval_seconds:
+        session.last_used_at = now
+        db.commit()
 
     return account, session
 

@@ -6,6 +6,7 @@ Vault master password never reaches the server.
 """
 
 import hashlib
+import ipaddress
 import secrets
 import threading
 import time
@@ -14,11 +15,12 @@ from typing import Final
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
+from fastapi import Request
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session as DbSession
 
 from vaultsync_server.config import settings
-from vaultsync_server.db.models import AuthRateLimit
+from vaultsync_server.db.models import AuthRateLimit, Session
 
 # Server-side Argon2id hasher for account passwords
 _hasher = PasswordHasher(
@@ -66,6 +68,49 @@ def generate_session_token() -> tuple[str, str]:
 def hash_token(token: str) -> str:
     """Compute constant-length SHA-256 verifier hex string for a session token."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def normalize_client_ip(ip_str: str | None) -> str:
+    """Normalize client IP address for rate-limiting bucket aggregation.
+
+    Security design:
+    - IPv4: normalized to standard canonical representation (/32).
+    - IPv6: normalized to /64 subnet prefix (e.g. 2001:db8:abcd:12::/64) to prevent
+      rate-limit bypass via ephemeral IPv6 interface identifier rotation within
+      subscriber allocations.
+    - IPv4-mapped IPv6 (::ffff:192.0.2.1): unwrapped to canonical IPv4.
+    - Malformed or absent input: safely returns 'unknown'.
+    """
+    if not ip_str or not isinstance(ip_str, str):
+        return "unknown"
+
+    cleaned = ip_str.strip()
+    # Strip brackets and ports if present, e.g. [2001:db8::1]:8080 or 192.0.2.1:8000
+    if cleaned.startswith("[") and "]" in cleaned:
+        cleaned = cleaned[1:cleaned.index("]")]
+    elif ":" in cleaned and cleaned.count(":") == 1:
+        cleaned = cleaned.split(":")[0]
+
+    try:
+        ip = ipaddress.ip_address(cleaned)
+        if isinstance(ip, ipaddress.IPv6Address):
+            if ip.ipv4_mapped:
+                return str(ip.ipv4_mapped)
+            return str(ipaddress.IPv6Network(f"{ip}/64", strict=False))
+        return str(ip)
+    except ValueError:
+        return "unknown"
+
+
+def get_client_ip(request: Request) -> str:
+    """Extract and normalize client IP from request for abuse control.
+
+    Security note on proxies:
+    Direct transport peer (request.client.host) is used as the authoritative source
+    to prevent spoofing via unverified X-Forwarded-For headers from untrusted clients.
+    """
+    raw_ip = request.client.host if request.client else None
+    return normalize_client_ip(raw_ip)
 
 
 class InMemoryRateLimiter:
@@ -188,3 +233,43 @@ db_rate_limiter = DatabaseRateLimiter(
     max_attempts=settings.rate_limit_max_attempts,
     window_seconds=settings.rate_limit_window_seconds,
 )
+
+
+def cleanup_inactive_sessions(
+    db: DbSession,
+    before: datetime | None = None,
+    limit: int | None = None,
+) -> int:
+    """Explicit, bounded deletion of expired or revoked session records.
+
+    Safety constraints:
+    - Deletes ONLY rows where revoked_at is not NULL or expires_at <= cutoff.
+    - Active, unexpired sessions are never touched.
+    - Operates as an explicit, bounded operation suitable for scheduled maintenance
+      or administrative invocation; does not run implicitly on hot request paths.
+
+    Args:
+        db: Active SQLAlchemy database session.
+        before: Reference UTC cutoff timestamp (defaults to current UTC time).
+        limit: Optional maximum rows to prune in a single operation.
+
+    Returns:
+        Number of deleted session records.
+    """
+    cutoff = before or datetime.now(timezone.utc)
+    condition = (Session.revoked_at.is_not(None)) | (Session.expires_at <= cutoff)
+
+    if limit is not None and limit > 0:
+        subq = (
+            select(Session.id)
+            .where(condition)
+            .limit(limit)
+            .scalar_subquery()
+        )
+        stmt = delete(Session).where(Session.id.in_(subq)).execution_options(synchronize_session=False)
+    else:
+        stmt = delete(Session).where(condition).execution_options(synchronize_session=False)
+
+    result = db.execute(stmt)
+    db.commit()
+    return result.rowcount or 0

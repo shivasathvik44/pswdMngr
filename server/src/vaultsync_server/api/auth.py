@@ -28,18 +28,26 @@ from vaultsync_server.services.auth import (
     DUMMY_PASSWORD_HASH,
     db_rate_limiter,
     generate_session_token,
+    get_client_ip,
     hash_password,
     rate_limiter,
     verify_password,
 )
 
-SYNTHETIC_SALT_KEY: Final[bytes] = hashlib.sha256(b"vaultsync:salt:synthetic:v1").digest()
+def get_synthetic_salt_key() -> bytes:
+    """Derive dedicated HMAC key for synthetic salt generation from configured server secret."""
+    secret = (settings.server_secret_key or "").encode("utf-8")
+    return hmac.new(secret, b"vaultsync:salt:synthetic:v1", hashlib.sha256).digest()
+
+
+SYNTHETIC_SALT_KEY: Final[bytes] = get_synthetic_salt_key()
 
 
 def generate_synthetic_salt(username: str) -> str:
     """Generate deterministic, valid-format 16-byte base64 salt for non-existent users."""
+    key = get_synthetic_salt_key()
     normalized = username.strip().lower().encode("utf-8")
-    raw = hmac.new(SYNTHETIC_SALT_KEY, normalized, hashlib.sha256).digest()[:16]
+    raw = hmac.new(key, normalized, hashlib.sha256).digest()[:16]
     return b64encode(raw)
 
 
@@ -62,7 +70,7 @@ async def register(
     The server stores the Argon2id hash of the account password and the public KDF salt.
     The server never receives the master password, KEK, or unencrypted vault key.
     """
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = get_client_ip(request)
     rate_key = f"reg:{client_ip}"
     if db_rate_limiter.is_rate_limited(db, rate_key) or rate_limiter.is_rate_limited(rate_key):
         raise HTTPException(
@@ -131,7 +139,7 @@ async def login(
     db: Annotated[DbSession, Depends(get_db)],
 ) -> LoginResponse:
     """Authenticate with independent server account password and issue a session bearer token."""
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = get_client_ip(request)
     normalized_username = req.username.strip().lower()
     ip_key = f"auth:ip:{client_ip}"
     user_key = f"auth:user:{normalized_username}"
@@ -245,7 +253,7 @@ async def change_account_password(
     Invalidates all other active sessions for the account.
     """
     account, current_session = auth_data
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = get_client_ip(request)
     pwd_key = f"auth:pwd:{account.id}"
     ip_key = f"auth:pwd_ip:{client_ip}"
 
@@ -308,7 +316,7 @@ async def get_user_salt(
     db: Annotated[DbSession, Depends(get_db)],
 ) -> SaltResponse:
     """Retrieve public KDF salt associated with a username without disclosing account existence."""
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = get_client_ip(request)
     normalized_username = username.strip().lower()
     ip_key = f"salt:ip:{client_ip}"
 

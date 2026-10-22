@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session as DbSession
 
 from vaultsync_server.api.dependencies import get_current_session
@@ -61,24 +61,28 @@ async def create_record(
     )
     existing = db.execute(stmt).scalar_one_or_none()
 
-    # Serialize cursor allocation per account to prevent concurrency races
-    locked_account = db.execute(
-        select(Account).where(Account.id == account.id).with_for_update()
-    ).scalar_one()
-    locked_account.sync_cursor += 1
+    if existing and not existing.is_deleted:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Record already exists. Use PUT to update.",
+        )
+
+    # Atomically allocate next sync cursor for this account in the same transaction
+    cursor_stmt = (
+        update(Account)
+        .where(Account.id == account.id)
+        .values(sync_cursor=Account.sync_cursor + 1)
+        .returning(Account.sync_cursor)
+    )
+    new_cursor = db.execute(cursor_stmt).scalar_one()
     now = datetime.now(timezone.utc)
 
     if existing:
-        if not existing.is_deleted:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Record already exists. Use PUT to update.",
-            )
         # Resurrect previously tombstoned record
         existing.ciphertext_payload = req.ciphertext_payload
         existing.is_deleted = False
         existing.revision += 1
-        existing.sync_cursor = locked_account.sync_cursor
+        existing.sync_cursor = new_cursor
         existing.updated_at = now
         record = existing
     else:
@@ -87,7 +91,7 @@ async def create_record(
             account_id=account.id,
             ciphertext_payload=req.ciphertext_payload,
             revision=1,
-            sync_cursor=locked_account.sync_cursor,
+            sync_cursor=new_cursor,
             is_deleted=False,
             created_at=now,
             updated_at=now,
@@ -196,16 +200,19 @@ async def update_record(
             ),
         )
 
-    # Serialize cursor allocation per account to prevent concurrency races
-    locked_account = db.execute(
-        select(Account).where(Account.id == account.id).with_for_update()
-    ).scalar_one()
-    locked_account.sync_cursor += 1
+    # Atomically allocate next sync cursor for this account in the same transaction
+    cursor_stmt = (
+        update(Account)
+        .where(Account.id == account.id)
+        .values(sync_cursor=Account.sync_cursor + 1)
+        .returning(Account.sync_cursor)
+    )
+    new_cursor = db.execute(cursor_stmt).scalar_one()
     now = datetime.now(timezone.utc)
 
     record.ciphertext_payload = req.ciphertext_payload
     record.revision += 1
-    record.sync_cursor = locked_account.sync_cursor
+    record.sync_cursor = new_cursor
     record.updated_at = now
 
     db.commit()
@@ -257,16 +264,19 @@ async def delete_record(
             ),
         )
 
-    # Serialize cursor allocation per account to prevent concurrency races
-    locked_account = db.execute(
-        select(Account).where(Account.id == account.id).with_for_update()
-    ).scalar_one()
-    locked_account.sync_cursor += 1
+    # Atomically allocate next sync cursor for this account in the same transaction
+    cursor_stmt = (
+        update(Account)
+        .where(Account.id == account.id)
+        .values(sync_cursor=Account.sync_cursor + 1)
+        .returning(Account.sync_cursor)
+    )
+    new_cursor = db.execute(cursor_stmt).scalar_one()
     now = datetime.now(timezone.utc)
 
     record.is_deleted = True
     record.revision += 1
-    record.sync_cursor = locked_account.sync_cursor
+    record.sync_cursor = new_cursor
     record.ciphertext_payload = ""  # Purge ciphertext content
     record.updated_at = now
 

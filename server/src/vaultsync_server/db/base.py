@@ -14,12 +14,13 @@ class Base(DeclarativeBase):
 
 
 def create_db_engine(url: str | None = None) -> Engine:
-    """Create and configure SQLAlchemy engine with SQLite foreign key enforcement."""
+    """Create and configure SQLAlchemy engine with SQLite foreign key enforcement and WAL mode."""
     db_url = url or settings.database_url
     connect_args: dict[str, Any] = {}
 
     if db_url.startswith("sqlite"):
         connect_args["check_same_thread"] = False
+        connect_args["timeout"] = 30.0
 
     engine = create_engine(
         db_url,
@@ -33,6 +34,11 @@ def create_db_engine(url: str | None = None) -> Engine:
         def set_sqlite_pragma(dbapi_connection, connection_record):
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+            except Exception:
+                pass
             cursor.close()
 
     return engine

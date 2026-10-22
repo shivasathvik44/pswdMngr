@@ -37,6 +37,21 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
         response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
         response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+
+        # Strict-Transport-Security (HSTS):
+        # Injected strictly in production when request is served over HTTPS or terminated
+        # at a verified, trusted TLS reverse proxy.
+        # An untrusted client connecting over HTTP cannot enable HSTS via forged forwarded headers.
+        if settings.environment == "production":
+            client_ip = request.client.host if request.client else None
+            is_trusted_proxy = bool(client_ip and client_ip in settings.trusted_proxies)
+            is_https = (
+                request.url.scheme == "https"
+                or (is_trusted_proxy and request.headers.get("x-forwarded-proto", "").lower() == "https")
+            )
+            if is_https:
+                response.headers["Strict-Transport-Security"] = "max-age=31536000"
+
         return response
 
 
@@ -143,12 +158,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 def create_app() -> FastAPI:
     """Factory function to build and configure the FastAPI application."""
+    is_production = settings.environment == "production"
     app = FastAPI(
         title=settings.app_name,
         version=settings.app_version,
         description="Self-hosted, end-to-end encrypted password manager synchronization backend.",
-        docs_url="/docs" if settings.environment != "production" else None,
-        redoc_url="/redoc" if settings.environment != "production" else None,
+        docs_url=None if is_production else "/docs",
+        redoc_url=None if is_production else "/redoc",
+        openapi_url=None if is_production else "/openapi.json",
         lifespan=lifespan,
     )
 

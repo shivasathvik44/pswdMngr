@@ -11,7 +11,7 @@ Crucially:
 
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session as DbSession
 
 from vaultsync_server.db.models import Account, Session
@@ -39,7 +39,8 @@ def reset_account_password_admin(
     4. Leaves kdf_salt, wrapped_vault_key, and all encrypted_records completely intact.
     5. Does NOT claim or provide any vault decryption or recovery without the vault master password.
     """
-    stmt = select(Account).where(Account.username == username)
+    normalized_username = username.strip().lower()
+    stmt = select(Account).where(func.lower(Account.username) == normalized_username)
     account = db.execute(stmt).scalar_one_or_none()
     if not account:
         raise AccountNotFoundError(f"Account '{username}' not found")
