@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "VaultSync Server"
-    app_version: str = "0.1.0"
+    app_version: str = "0.9.0-beta.1"
     environment: str = Field(default="development", description="Environment: development, test, production")
     debug: bool = Field(default=False, description="Debug mode flag")
     
@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     
     # Database configuration
     database_url: str = Field(
-        default="sqlite:///./vaultsync.db",
+        default="sqlite:///./vaultsync_dev.db",
         description="SQLAlchemy database URL",
     )
 
@@ -72,6 +72,10 @@ class Settings(BaseSettings):
             ):
                 raise ValueError(
                     "VAULTSYNC_SERVER_SECRET_KEY must be set to a secure secret of at least 32 characters in production."
+                )
+            if self.database_url == "sqlite:///./vaultsync.db":
+                raise ValueError(
+                    "Production database_url cannot point to the protected root vaultsync.db file."
                 )
         return self
 

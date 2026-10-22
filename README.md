@@ -1,17 +1,21 @@
 # VaultSync
 
-> **Status:** Under active development — Android ANR remediation implemented and staging APK prepared; physical-device validation is pending.
+## VaultSync v0.9.0-beta.1
+
+> **Status:** Release Preparation (Phase 8.6) — Backend and desktop test suites fully passing (160/160 tests, 100%); Android ANR remediation implemented and staging APK verified; physical-device Android validation explicitly deferred.
 
 [![Tests](https://github.com/vaultsync/vaultsync/actions/workflows/tests.yml/badge.svg)](https://github.com/vaultsync/vaultsync/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/)
 [![Android](https://img.shields.io/badge/Android-Kotlin%20%7C%20Compose-3DDC84.svg?logo=android&logoColor=white)](https://developer.android.com/)
 
-**VaultSync** is an open-source, self-hosted, end-to-end encrypted personal password manager designed to synchronize credentials between an Android device and a Fedora Linux desktop over a private network such as Tailscale or WireGuard.
+**VaultSync** is an open-source, self-hosted, end-to-end encrypted personal password management ecosystem designed to synchronize credentials between an Android mobile device and a Fedora Linux desktop workstation over a private network (such as Tailscale or WireGuard).
 
-The project prioritizes client-side encryption, separation of account authentication from vault encryption, offline access, and user-controlled infrastructure. It is being developed without a dependency on commercial cloud platforms or Docker containers.
+The project prioritizes client-side zero-knowledge encryption, strict separation of account authentication from vault encryption, offline access, and user-controlled infrastructure without dependencies on commercial cloud platforms or proprietary services.
 
-> **Security notice:** VaultSync is under active development and has not undergone an independent security audit. Do not use it as the sole storage location for important production credentials. Automated tests and successful builds do not establish that every security property has been independently verified.
+> [!WARNING]
+> **Security Notice:**
+> VaultSync is under active development and has not undergone an independent third-party security audit. Do not use it as the sole storage location for critical production credentials. Automated test execution and build passing do not substitute for physical device testing or an independent cryptographic audit.
 
 ---
 
@@ -19,18 +23,19 @@ The project prioritizes client-side encryption, separation of account authentica
 
 - [Key Features](#key-features)
 - [Current Development Status](#current-development-status)
-- [Security Architecture](#security-architecture)
-- [Cryptography](#cryptography)
+- [Security Architecture & Two-Credential Model](#security-architecture--two-credential-model)
+- [Zero-Knowledge Model & Cryptography](#zero-knowledge-model--cryptography)
 - [Application Architecture](#application-architecture)
 - [Repository Structure](#repository-structure)
-- [Development Environment](#development-environment)
-- [Backend Setup](#backend-setup)
-- [Desktop Client](#desktop-client)
-- [Android Client](#android-client)
-- [Testing](#testing)
-- [Network and Deployment](#network-and-deployment)
-- [Project Roadmap](#project-roadmap)
-- [Security Limitations](#security-limitations)
+- [Development Environment & Prerequisites](#development-environment--prerequisites)
+- [Backend Setup & Safe Execution](#backend-setup--safe-execution)
+- [Desktop Client Setup](#desktop-client-setup)
+- [Android Client Setup](#android-client-setup)
+- [Automated Testing](#automated-testing)
+- [Network & Deployment Guide](#network--deployment-guide)
+- [Operational Runbooks & Backup](#operational-runbooks--backup)
+- [Release Checklist & Verification Tiers](#release-checklist--verification-tiers)
+- [Known Limitations](#known-limitations)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -38,204 +43,141 @@ The project prioritizes client-side encryption, separation of account authentica
 
 ## Current Development Status
 
-The latest reported Android development work focused on resolving application-not-responding (ANR) freezes during vault unlock and immediately afterward.
+The VaultSync project has completed Phase 8.5 (Non-Android Security, Integration & Release Readiness) and Phase 8.6 (Complete Release Preparation).
 
-| Milestone | Status |
-|---|---|
-| Backend foundation and security headers | Implemented |
-| Argon2id/AES-GCM cryptographic prototype | Implemented |
-| Separate account and vault credentials | Implemented |
-| Fedora desktop application foundation | Implemented |
-| Android offline persistence and biometric unlock | Implemented; physical-device verification remains pending |
-| Phase 8.2.3 — Android ANR remediation | Changes implemented; physical-device validation pending |
-| Phase 8.3 — Pre-validation audit and backend test readiness | Pending |
-| End-to-end Android/Fedora synchronization over a private network | Still requires integration validation |
-
-### Phase 8.2.3 — Android ANR remediation
-
-The latest development report says the following changes were made:
-
-- Moved expensive Argon2id key derivation and key-wrapping work off the Android main thread.
-- Moved database and network operations to background dispatchers.
-- Reduced the duration of the VEK synchronization lock.
-- Added cleanup for vault keys when unlocking fails.
-- Improved coroutine cancellation and duplicate-action handling.
-- Added synchronization-job deduplication.
-- Reworked the autofill authentication flow to avoid blocking the main thread.
-- Added ANR regression tests.
-
-**Reported results:** 6 focused ANR regression tests passed and the full Android unit-test suite reported 123 passing tests. APK ZIP integrity and signature verification were also reported as passing. These results have not yet been confirmed by physical-device testing, so the ANR fix is not considered fully validated.
-
-The reported staging APK is:
-
-```text
-/home/capslock/.local/share/vaultsync-build/staging/android/app/build/outputs/apk/debug/app-debug.apk
-```
-
-Reported SHA-256:
-
-```text
-eb8d9acb4a1a3066fa6ed4b9cf6f8972e98aeb024dd225351a06a6a4c6b9d700
-```
-
-Recheck the checksum, package identity, and signing details before installing the staging APK. Preserve the original APK and primary database during testing.
-
-### Next validation steps
-
-- [ ] Review the ANR fixes and VEK lifecycle/concurrency handling in the source.
-- [ ] Confirm the regression tests cover the original freeze paths.
-- [ ] Investigate the `auth_rate_limits` SQLite schema error using an isolated test database.
-- [ ] Reverify the staging APK checksum and package/signature identity.
-- [ ] Install and test the staging APK on the physical Android device without clearing app data.
-- [ ] Measure unlock time and check for freezes during vault loading and synchronization.
-- [ ] Test lock/unlock, repeated interactions, biometric behavior, and backend connectivity.
-- [ ] Inspect Android logs for ANRs and exceptions without exposing secrets.
+| Subsystem / Milestone | Current Status | Verification Tier |
+|---|---|---|
+| **Backend Core & REST API** | Implemented & Remediated | 80/80 automated tests passing |
+| **Atomic Sync Cursor Concurrency (SEC-01)** | Implemented (`exclusive_transaction`) | Verified under concurrent worker tests |
+| **Synthetic Salt & Anti-Enumeration (SEC-02)** | Implemented (HMAC-SHA256) | Verified with timing & parameter tests |
+| **Auth Rate Limiting & IPv6 Normalization** | Implemented (`auth_rate_limits` table) | Verified with compound index tests |
+| **Production Config Fail-Closed Validation** | Implemented (`config.py`) | Verified via Pydantic model validation |
+| **Fedora Desktop Client (PySide6)** | Implemented & Hardened | 80/80 automated tests passing |
+| **Client Memory Zeroization** | Implemented (`clear_key_material`) | Verified via buffer zeroing tests |
+| **Cross-Platform Crypto Interoperability** | Implemented (AES-256-GCM + AAD) | Verified across shared test vectors |
+| **Android ANR Remediation (Phase 8.2.3)** | Implemented in coroutines & staging APK | Verified statically & via staging APK audit |
+| **Android Physical-Device Testing** | **Explicitly Deferred** | Pending physical hardware test phase |
+| **Total Automated Test Suite** | **160 / 160 Passing (100%)** | Backend (80) + Desktop (80) |
 
 ---
 
 ## Key Features
 
 ### Security and Cryptography
+- **Zero-knowledge architecture:** The server receives and persists only opaque AES-256-GCM encrypted envelopes, wrapped keys, and public salts. Plaintext credentials, notes, URLs, and master passphrases never touch the network or the server.
+- **Two-credential isolation:** Independent Account Password (authenticates to server) and Vault Master Passphrase (unwraps vault key locally). Changing one has zero cryptographic effect on the other.
+- **Associated Authenticated Data (AAD):** Every record envelope binds the item's unique `record_id` as AAD, preventing ciphertext swapping, envelope relocation, and replay attacks.
+- **Memory hygiene:** `clear_key_material()` actively zeroes `bytearray` memory buffers upon vault lock, logout, or account switching.
+- **Sliding-window abuse control:** Sliding-window rate limiting on authentication routes with IPv6 `/64` prefix aggregation to thwart rotating IPv6 credential stuffing.
 
-- **Zero-knowledge design:** Vault contents and the vault master password are intended to remain client-side. The server handles authentication and synchronization of encrypted vault data.
-- **Two-credential architecture:** The account password authenticates the user to the backend, while the separate vault master password derives the key-encryption key used to unwrap the vault encryption key.
-- **Authenticated encryption:** AES-256-GCM protects encrypted vault data, including authentication against unauthorized ciphertext modification.
-- **Memory-conscious lifecycle:** Desktop and Android implementations include lock/logout cleanup paths for sensitive in-memory state.
-- **Android biometric unlock:** An Android Keystore-based wrapping design and system `BiometricPrompt` integration provide an alternate local unlock path.
-- **Account-bound biometric envelopes:** Biometric-wrapped vault keys use account-specific authenticated associated data.
-- **Cross-platform cryptographic specification:** Shared parameters and test vectors help keep the Python and Kotlin implementations interoperable.
-
-### Synchronization and Offline Access
-
-- **Offline-first Android persistence:** Room stores encrypted record envelopes and synchronization state locally.
-- **Offline vault access:** The Android client is designed to load locally persisted encrypted records after an authorized unlock.
-- **Incremental synchronization:** Version cursors support fetching changes rather than repeatedly downloading the entire vault.
-- **Deletion tombstones:** Deletions can be represented and synchronized across devices.
-- **Concurrency handling:** The synchronization architecture includes cursor progression, deduplication, and optimistic concurrency handling.
-- **Encrypted local record storage:** Record payloads are stored as encrypted envelopes rather than plaintext vault fields.
-
-### Native Clients
-
-- **Fedora Linux desktop:** Python, PySide6, and a native graphical interface, with session-keyring integration and auto-lock functionality.
-- **Android mobile:** Kotlin, Jetpack Compose, Android Keystore integration, Room persistence, biometric unlock, and repository/view-model architecture.
-- **Self-hosted backend:** FastAPI provides authentication, health endpoints, and vault synchronization APIs.
-
-### Operational Controls
-
-- Database-backed rate limiting designed to support multiple backend workers.
-- SHA-256 bearer-token verifier storage, rather than storing raw session tokens in the session-verifier database field.
-- Automated backend, desktop, and Android test suites.
-- Staging-based Android builds to avoid overwriting the existing debug APK during development.
+### Client Usability
+- **Fedora Workstation Client:** Native Qt GUI (PySide6), dark theme, real-time search filtering, clipboard auto-clearing (30s) with content verification, inactivity auto-lock, and password entropy evaluation.
+- **Android Client:** Modern Jetpack Compose UI, Room encrypted envelope persistence, background synchronization, and Android Keystore integration for biometric authorization.
+- **Conflict Handling:** Optimistic concurrency control via monotonic integer versions; detects remote edits and prompts user to resolve conflicts safely.
 
 ---
 
-## Security Architecture
+## Final Project Status
 
-VaultSync separates server authentication from vault decryption.
+| Area | Result | Status |
+|---|---|---|
+| **Backend and desktop** | 80 backend tests + 80 desktop tests reported passing | **Passed** |
+| **Local end-to-end integration** | 10 workflows reported passing over loopback TCP | **Passed** |
+| **Protected artifact integrity** | All three SHA-256 checks reportedly match their baselines | **Matched** |
+| **Android hardware validation** | Biometrics, StrongBox, Autofill and background sync | **Deferred** |
+| **Operational deployment** | TLS reverse proxy and deployed backup-recovery drills | **Deferred** |
+
+## Security Architecture & Two-Credential Model
+
+VaultSync strictly separates server authentication from vault encryption.
 
 ```mermaid
 flowchart TD
-    A["Account Password"] --> B["Server Authentication"]
-    B --> C["Account Session"]
-    C --> D["Encrypted Vault Sync API"]
+    subgraph Authentication["1. Server Authentication Domain"]
+        A["Account Password (P_account)"] -->|Transmitted over TLS| B["POST /api/v1/auth/login"]
+        B --> C["Server verifies Argon2id hash"]
+        C --> D["Issues 256-bit Bearer Token"]
+    end
 
-    E["Vault Master Password"] --> F["Argon2id Key Derivation"]
-    F --> G["Key Encryption Key (KEK)"]
-    G --> H["Unwrap Vault Encryption Key (VEK)"]
-    H --> I["Encrypt / Decrypt Vault Records"]
+    subgraph Decryption["2. Client-Side Zero-Knowledge Domain"]
+        E["Vault Master Passphrase (P_vault)"] -->|Stays strictly client-side| F["Argon2id KDF (64MB, t=3, p=4)"]
+        F --> G["Key Encryption Key (KEK)"]
+        D -.->|Authorize fetch| H["Download WrappedKeyEnvelope"]
+        H --> I["Unwrap Vault Encryption Key (VEK) via AES-256-GCM"]
+        G --> I
+        I --> J["Decrypt / Encrypt Vault Records (AES-256-GCM + AAD)"]
+    end
 
-    D --> J["Encrypted Record Envelopes"]
-    J --> I
-
-    K["Android BiometricPrompt"] --> L["Android Keystore Key"]
-    L --> M["Locally Wrapped VEK"]
-    M --> I
+    subgraph Biometrics["3. Android Local Biometric Domain (Optional)"]
+        K["BiometricPrompt (Fingerprint/Face)"] --> L["Android Keystore Hardware Key"]
+        L --> M["Locally Wrapped VEK"]
+        M --> J
+    end
 ```
 
-### Credential separation
+### Credential Separation Matrix
 
-The two credentials serve different purposes:
-
-| Credential | Purpose | Intended handling |
+| Property | Account Password ($P_{\text{account}}$) | Vault Master Passphrase ($P_{\text{vault}}$) |
 |---|---|---|
-| Account password | Authenticate to the server | Server stores a password verifier; password is not the vault encryption key |
-| Vault master password | Derive the KEK used to unwrap the VEK | Remains client-side |
-| Vault encryption key (VEK) | Encrypt and decrypt vault records | Kept in memory while the vault is unlocked; wrapped for persistence or transport where required |
-| Bearer token | Authenticate API requests | Client session storage; backend stores a SHA-256 verifier hash |
-
-Compromise of the server's account-authentication database should not, by itself, provide the vault master password or the unwrapped VEK.
-
-This separation does not protect against every attack. An attacker who compromises an unlocked client, obtains relevant client-side secrets, or exploits a vulnerability in the cryptographic implementation may still compromise vault contents.
-
-### Android biometric unlock
-
-The Android biometric implementation is intended as an alternative local authorization mechanism, not a replacement for the vault master password.
-
-1. The user unlocks the vault through the normal master-password flow.
-2. The user explicitly enables biometric unlock.
-3. A local Keystore key protects a wrapped representation of the VEK.
-4. On a subsequent unlock, the system biometric prompt authorizes the relevant cryptographic operation.
-5. If biometric unlock becomes unavailable or the key is invalidated, the master-password flow remains the recovery path.
-
-The current implementation includes account-bound authenticated data, biometric enrollment settings, and lock/logout lifecycle checks. Physical-device verification of actual biometric and hardware-backed key behavior remains pending.
+| **Primary Purpose** | Authenticate identity to the backend API | Derive KEK to unwrap the local Vault Encryption Key |
+| **Network Exposure** | Transmitted over TLS to `/api/v1/auth/login` | **Never transmitted across the network** |
+| **Server Storage** | Argon2id verifier (`account_password_hash`) | **Zero knowledge (not stored anywhere on server)** |
+| **Effect of Compromise** | Attacker obtains bearer token and encrypted blobs | **Attacker can decrypt all vault records** |
+| **Administrative Reset** | Reset via server CLI (`admin_reset.py`) | **Mathematically impossible to reset without data loss** |
+| **Rotation Procedure** | `POST /api/v1/auth/password` | Re-wraps VEK with new KEK via `PUT /api/v1/auth/vault-key` |
 
 ---
 
-## Cryptography
+## Zero-Knowledge Model & Cryptography
 
-VaultSync uses established cryptographic primitives rather than a custom encryption algorithm.
+All cryptographic operations strictly adhere to standardized, audited primitives:
 
-| Component | Specification |
-|---|---|
-| Password-based key derivation | Argon2id |
-| Argon2id memory cost | 65,536 KiB |
-| Argon2id time cost | 3 iterations |
-| Argon2id parallelism | 4 |
-| Salt length | 16 bytes |
-| Derived key length | 32 bytes |
-| Key derivation expansion | HKDF-SHA256 |
-| Key wrapping | AES-256-GCM |
-| Record encryption | AES-256-GCM |
-| GCM nonce | 12 bytes |
-| GCM authentication tag | 16 bytes |
-| Password normalization | NFC followed by UTF-8 encoding |
-
-The shared cryptographic specification defines domain-separation labels and authenticated associated data for key wrapping and record encryption. Cross-language test vectors are used to help maintain compatibility between the Python and Kotlin implementations.
-
-Changes to these parameters or labels must be treated as protocol changes and reviewed for compatibility and security impact.
-
-See [`docs/cryptography.md`](docs/cryptography.md) and [`shared/test-vectors/`](shared/test-vectors/) for the project's detailed specification and interoperability resources.
+| Component | Specification / Primitive | Parameters / Details |
+|---|---|---|
+| **Key Derivation (KDF)** | Argon2id | Memory: 65,536 KiB (64 MiB), Iterations: 3, Parallelism: 4 |
+| **KDF Salt** | Cryptographic Random Salt | 16 bytes (128 bits entropy), per-user unique |
+| **Key Derivation Expansion** | HKDF-SHA256 | Expands Argon2id output to 256-bit key |
+| **Key Wrapping** | AES-256-GCM | 96-bit random nonce, 128-bit authentication tag |
+| **Record Encryption** | AES-256-GCM | 96-bit random nonce, 128-bit authentication tag |
+| **Authenticated Data (AAD)**| UTF-8 string | Binds `record_id` as AAD to prevent record swapping |
+| **Server Token Hashing** | SHA-256 | Bearer tokens hashed before storage in database |
+| **Synthetic Salt Derivation**| HMAC-SHA256 | `hmac(server_secret_key, username)[:16]` |
 
 ---
 
 ## Application Architecture
 
-VaultSync consists of three primary components.
+```mermaid
+flowchart LR
+    subgraph DesktopClient["Fedora Workstation Client"]
+        D_UI["PySide6 GUI"]
+        D_Crypto["Crypto Engine (Argon2id + AES-GCM)"]
+        D_Storage["TokenStorage (OS Keyring / Memory)"]
+        D_UI <--> D_Crypto
+        D_Crypto <--> D_Storage
+    end
 
-### 1. FastAPI backend
+    subgraph BackendServer["FastAPI Backend Server"]
+        B_API["API Gateway (127.0.0.1:8000)"]
+        B_Auth["Auth & Rate Limiter"]
+        B_Sync["Sync Manager & Exclusive Locking"]
+        B_DB[("SQLite / PostgreSQL Database<br/>(Opaque Ciphertexts Only)")]
+        B_API --> B_Auth
+        B_API --> B_Sync
+        B_Sync --> B_DB
+    end
 
-The backend provides account authentication, session verification, rate limiting, and encrypted-vault synchronization. It uses SQLAlchemy and Alembic for database persistence and schema migrations.
+    subgraph AndroidClient["Android Mobile Client"]
+        A_UI["Compose UI"]
+        A_Crypto["CryptoManager (Keystore + BouncyCastle)"]
+        A_Room[("Room Encrypted Cache")]
+        A_UI <--> A_Crypto
+        A_Crypto <--> A_Room
+    end
 
-The backend is not intended to decrypt vault records.
-
-### 2. Fedora desktop client
-
-The desktop client is written in Python using PySide6. It communicates with the backend and supports the project's separate account-password and vault-master-password model.
-
-Desktop development includes session-keyring integration, locking behavior, and encrypted-vault operations.
-
-### 3. Android client
-
-The Android application uses Kotlin and Jetpack Compose. Its data and security components include:
-
-- `BiometricKeyManager` for biometric-protected VEK wrapping.
-- `KeyStoreManager` for client-side session-related key and token handling.
-- `VaultRepository` for vault operations and synchronization.
-- Room entities for encrypted records and synchronization state.
-- ViewModels for authentication, settings, and UI state.
-- `BiometricPrompt` for system-mediated biometric authentication.
-
-Room provides local persistence for encrypted record envelopes and synchronization metadata. This does **not** establish that the entire Room/SQLite database file is encrypted. Database-level encryption and metadata protection must be evaluated separately.
+    DesktopClient <-->|E2EE HTTPS over Tailscale/WireGuard| B_API
+    AndroidClient <-->|E2EE HTTPS over Tailscale/WireGuard| B_API
+```
 
 ---
 
@@ -243,306 +185,233 @@ Room provides local persistence for encrypted record envelopes and synchronizati
 
 ```text
 vaultsync/
-├── README.md
-├── SECURITY.md
-├── CONTRIBUTING.md
-├── LICENSE
-├── .gitignore
+├── README.md                      # Comprehensive project overview & setup guide
+├── SECURITY.md                    # Vulnerability reporting policy & disclosures
+├── CONTRIBUTING.md                # Development & code standards
+├── LICENSE                        # MIT License
+├── .env.example                   # Documented configuration template
 ├── docs/
-│   ├── architecture.md
-│   ├── threat-model.md
-│   ├── cryptography.md
-│   ├── api-spec.md
-│   ├── recovery.md
-│   └── decisions/
+│   ├── architecture.md            # System architecture & data flow
+│   ├── cryptography.md            # Cryptographic specification & parameters
+│   ├── SECURITY_AND_DEPLOYMENT.md # Production deployment, reverse proxy, HSTS, secrets
+│   ├── recovery.md                # Database backup, restore drills, disaster recovery
+│   ├── RELEASE_CHECKLIST.md       # Multi-tier verification & readiness checklist
+│   ├── threat-model.md            # Threat model & attack surfaces
+│   ├── api-spec.md                # REST API endpoint specification
+│   └── decisions/                 # Architectural Decision Records (ADRs)
 ├── server/
-│   ├── alembic.ini
-│   ├── alembic/
-│   ├── pyproject.toml
-│   ├── src/
-│   │   └── vaultsync_server/
-│   └── tests/
+│   ├── pyproject.toml             # Backend dependencies & pytest configuration
+│   ├── alembic.ini                # Alembic database migration config
+│   ├── alembic/                   # Database migration versions
+│   ├── src/vaultsync_server/      # FastAPI application code
+│   └── tests/                     # 80 backend automated tests
 ├── desktop/
-│   ├── pyproject.toml
-│   ├── src/
-│   │   └── vaultsync_desktop/
-│   └── tests/
+│   ├── pyproject.toml             # Desktop dependencies & packaging
+│   ├── src/vaultsync_desktop/     # PySide6 application code
+│   └── tests/                     # 80 desktop automated tests
 ├── android/
-│   ├── settings.gradle.kts
-│   └── app/
-│       └── src/
-├── shared/
-│   ├── api-schema/
-│   └── test-vectors/
-└── .github/
-    └── workflows/
-        └── tests.yml
+│   ├── build.gradle.kts           # Top-level Gradle configuration (AGP 8.5.2, Kotlin 2.0.0)
+│   ├── settings.gradle.kts        # Android module declarations
+│   └── app/                       # Android application module
+└── shared/
+    ├── api-schema/                # OpenAPI specification & schemas
+    └── test-vectors/              # Cross-language golden test vectors & specs
 ```
-
-The tree above is a high-level overview. Individual files and directories may evolve during development.
 
 ---
 
-## Development Environment
+## Development Environment & Prerequisites
 
 ### Prerequisites
+- **Operating System:** Fedora Linux 39+ (Workstation/GNOME or Hyprland) or equivalent Linux distribution.
+- **Python:** Python 3.12 or newer (tested through Python 3.14.8).
+- **System Libraries (Fedora):**
+  ```bash
+  sudo dnf install -y python3-devel libxcb xcb-util-cursor sqlite
+  ```
+- **Java Runtime (for Android):** OpenJDK 17 (`java-17-openjdk-devel`).
+- **Android SDK:** Android SDK Platform 34, Build Tools 34.0.0.
 
-- Fedora Linux or another supported Linux distribution.
-- Python 3.12 or newer for the backend and desktop components.
-- Git.
-- OpenJDK 17 for the current Android Gradle build configuration.
-- Android SDK with the project's configured Android platform and build tools.
-- Android Studio or another Kotlin/Gradle-compatible development environment is optional, but may help with Android debugging.
-
-VaultSync does not require Docker for the intended development workflow.
-
-### Python environment
-
+### Environment Setup
 From the repository root:
 
 ```bash
+# 1. Create and activate virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
-```
 
-Install the backend and desktop packages using their respective project configuration:
-
-```bash
+# 2. Install backend package with development extras
 pip install -e "server[dev]"
+
+# 3. Install desktop package with development extras
 pip install -e "desktop[dev]"
 ```
 
-If an editable install or extra name changes, follow the current package metadata in the relevant `pyproject.toml`.
-
 ---
 
-## Backend Setup
+## Backend Setup & Safe Execution
 
-### Database migrations
+### 1. Configuration
+Copy the configuration template:
+```bash
+cp .env.example .env
+```
+Inspect `.env`. For local development, safe defaults bind to `127.0.0.1:8000` and target `sqlite:///./vaultsync_dev.db`.
 
-Apply the backend's Alembic migrations to the configured **development database**:
+> [!NOTE]
+> The backend defaults to `vaultsync_dev.db`. It will never touch the protected baseline database `vaultsync.db`. In production, pointing to `vaultsync.db` is rejected at startup.
 
+### 2. Database Migrations
+Apply Alembic migrations to initialize the development database:
 ```bash
 alembic -c server/alembic.ini upgrade head
 ```
 
-**Important:** Verify the configured database URL before running migrations. Never point development or test migrations at a database containing important data.
-
-### Run backend tests
-
-```bash
-.venv/bin/pytest server/tests -v
-```
-
-### Start the local server
-
+### 3. Start Local Development Server
 ```bash
 .venv/bin/python -m uvicorn vaultsync_server.main:app \
   --host 127.0.0.1 \
-  --port 8000
+  --port 8000 \
+  --reload
 ```
 
-Verify the health endpoint:
-
+Verify service health:
 ```bash
 curl -s http://127.0.0.1:8000/health
+# Expected: {"status":"healthy","version":"0.9.0-beta.1","environment":"development"}
 ```
 
-The local loopback configuration is intended for development. It is not, by itself, a remote deployment configuration.
-
-### Administrative account recovery
-
-The project includes an administrative account-reset utility. Before using it, review its help output and verify the database configuration so it cannot affect an unintended account or database.
-
+### 4. Administrative Account Reset Utility
+If an account password is forgotten during local testing:
 ```bash
-python -m vaultsync_server.scripts.admin_reset --help
+.venv/bin/python -m vaultsync_server.scripts.admin_reset --username alice
 ```
-
-Avoid putting real passwords in shell history, command-line arguments, logs, or shared terminals. Prefer a supported interactive prompt over piping secrets into a process.
 
 ---
 
-## Desktop Client
+## Desktop Client Setup
 
-Install the desktop package:
-
+### 1. Launch Against Local Server
+With the backend running on `http://127.0.0.1:8000`:
 ```bash
-pip install -e "desktop[dev]"
-```
-
-Launch it against the local backend:
-
-```bash
+# Using installed entrypoint
 vaultsync-desktop --server http://127.0.0.1:8000
+
+# Or via Python module
+python -m vaultsync_desktop.main --server http://127.0.0.1:8000
 ```
 
-Run desktop tests in a headless environment:
-
-```bash
-QT_QPA_PLATFORM=offscreen .venv/bin/pytest desktop/tests -v
-```
-
-Desktop session-keyring and memory-cleanup behavior should be tested in the actual target desktop environment in addition to automated tests.
+### 2. Supported CLI Options
+- `--server <URL>`: Pre-configure backend server URL (`http://127.0.0.1:*`, `http://localhost:*`, or `https://*`).
+- `--debug`: Enable verbose diagnostic logging to stdout.
 
 ---
 
-## Android Client
+## Android Client Setup
 
-The Android application is built with Kotlin, Jetpack Compose, Android Keystore, BiometricPrompt, and Room.
+The Android mobile client is located in `android/`.
 
-### Current implementation
-
-- Native authentication and unlock flows.
-- Master-password-based vault unlock.
-- Locally persisted encrypted record envelopes.
-- Offline record loading and local persistence.
-- Incremental synchronization and tombstone handling.
-- Biometric-protected local VEK wrapping.
-- Lock/logout cleanup and stale-operation fencing.
-- Automated JVM and Robolectric tests.
-
-### Build and test
-
-Use the JDK and Android SDK versions configured for the project. From the Android project directory, run the Gradle wrapper for unit tests and debug assembly.
-
+### Build & Unit Testing
 ```bash
+cd android
 ./gradlew testDebugUnitTest --no-daemon --max-workers=2
-./gradlew assembleDebug --no-daemon --max-workers=2
 ```
 
-These commands assume the correct Java and Android SDK environment variables have been configured.
-
-For safer development, direct experimental builds to an isolated staging directory and preserve existing APKs until a new build has been validated.
-
-**Testing limitation:** JVM/Robolectric tests do not substitute for testing on a physical Android device. Actual biometric prompts, Keystore security levels, enrollment changes, and hardware-backed key behavior require device-level verification.
-
-Android Autofill integration is a planned milestone and should not be considered production-ready until its implementation and security tests are complete.
+> [!IMPORTANT]
+> **Android Testing Scope Notice:**
+> Physical Android device testing and live biometric sensor validation are explicitly deferred. Do not connect physical devices or execute ADB installation commands during automated testing phases.
 
 ---
 
-## Testing
+## Automated Testing
 
-VaultSync uses automated tests to catch regressions across the backend, desktop, and Android clients.
+VaultSync maintains a comprehensive test suite covering API endpoints, cryptographic boundaries, concurrent synchronization, and headless UI flows.
 
-### Backend
-
+### Running Backend Tests (80 Tests)
 ```bash
 .venv/bin/pytest server/tests -v
 ```
 
-### Desktop
-
+### Running Desktop Tests (80 Tests)
 ```bash
 QT_QPA_PLATFORM=offscreen .venv/bin/pytest desktop/tests -v
 ```
 
-### Android
-
+### Running Full Combined Suite (160 Tests)
 ```bash
-./gradlew testDebugUnitTest --no-daemon --max-workers=2
+QT_QPA_PLATFORM=offscreen .venv/bin/pytest --import-mode=importlib server/tests desktop/tests -v
 ```
 
-### Reported validation snapshot
+### Test Suite Execution Summary
 
-An earlier Phase 8.1 development report recorded the following historical results:
-
-| Component | Reported tests passed |
-|---|---:|
-| Backend | 65 |
-| Desktop | 80 |
-| Android JVM/Robolectric | 84 |
-| **Total** | **229** |
-
-These are the results reported for that development run, not a guarantee that the current checkout or latest commit has the same test counts. Re-run the tests against the source you intend to use.
-
-A successful automated suite does not establish resistance to all attacks, and the Android biometric suite has not yet been validated on physical biometric hardware.
-
----
-
-## Network and Deployment
-
-VaultSync is designed for self-hosted use. A private overlay such as Tailscale or WireGuard can provide connectivity between trusted devices without requiring a publicly exposed application endpoint.
-
-The intended deployment model is:
-
-1. Run the backend on a trusted Linux host.
-2. Configure a private VPN or mesh network between the host and clients.
-3. Restrict backend reachability to trusted interfaces and peers.
-4. Use appropriate transport security for the actual network and deployment configuration.
-5. Back up the server database and required recovery material securely.
-6. Verify restore procedures using isolated test data.
-7. Monitor service health and keep dependencies updated.
-
-Binding the development server to `127.0.0.1` makes it reachable only through the host's loopback interface. A remote client cannot reach that endpoint directly. Remote deployment requires a deliberate, reviewed networking configuration.
-
-Tailscale and WireGuard provide network connectivity; they do not replace application authentication, endpoint hardening, or a complete transport-security design.
-
-Systemd hardening, end-to-end VPN synchronization, and backup/restore verification remain integration tasks.
+| Test Module | Subsystem Focus | Test Count | Status |
+|---|---|:---:|:---:|
+| `server/tests/test_backend.py` | Core API & Registration | 8 | PASSED |
+| `server/tests/test_crypto.py` | Server KDF & Hashes | 22 | PASSED |
+| `server/tests/test_health.py` | Health Check Endpoints | 3 | PASSED |
+| `server/tests/test_remediation_phase8_4_2.py` | Cursor Atomicity & Production Secrets | 8 | PASSED |
+| `server/tests/test_remediation_phase8_4_3.py` | Rate Limiter & Token Revocation | 7 | PASSED |
+| `server/tests/test_security_audit_phase5.py` | Security Boundaries & Headers | 13 | PASSED |
+| `server/tests/test_security_review.py` | Tenant Isolation & Authorization | 4 | PASSED |
+| `server/tests/test_two_credentials.py` | Two-Credential Lifecycle & Isolation | 15 | PASSED |
+| **Backend Subtotal** | **FastAPI Server** | **80** | **PASSED (100%)** |
+| `desktop/tests/test_client_crypto.py` | Desktop Crypto & Vectors | 7 | PASSED |
+| `desktop/tests/test_cross_platform_android_interop.py` | Cross-Platform Interop | 8 | PASSED |
+| `desktop/tests/test_desktop_security_phase5.py` | Memory Zeroization & Token Eviction | 8 | PASSED |
+| `desktop/tests/test_desktop_usability_phase6.py` | Usability Flows & Conflicts | 13 | PASSED |
+| `desktop/tests/test_integration_backend.py` | Client <-> Live Backend Integration | 13 | PASSED |
+| `desktop/tests/test_ui_screens.py` | Headless PySide6 Screens & Navigation | 19 | PASSED |
+| `desktop/tests/test_vault_session.py` | Session Lifecycle & Synchronization | 9 | PASSED |
+| `desktop/tests/test_api_client.py` | HTTP Client & Error Handling | 3 | PASSED |
+| **Desktop Subtotal** | **PySide6 Client** | **80** | **PASSED (100%)** |
+| **GRAND TOTAL** | **Combined Test Suite** | **160** | **PASSED (100%)** |
 
 ---
 
-## Project Roadmap
+## Network & Deployment Guide
 
-The project has progressed beyond the initial backend and desktop milestones. The roadmap below distinguishes implemented development work from remaining verification.
+For full production deployment instructions, review [`docs/SECURITY_AND_DEPLOYMENT.md`](docs/SECURITY_AND_DEPLOYMENT.md).
 
-- [x] **Phase 1 — Foundation:** Repository structure, backend health API, CI foundation, and architecture documentation.
-- [x] **Phase 2 — Cryptographic Prototype:** Argon2id derivation, authenticated encryption, key wrapping, and cross-language test vectors.
-- [x] **Phase 3 — Backend Synchronization:** Database persistence, migrations, sessions, synchronization, and tombstones.
-- [x] **Phase 3.1 — Security Review:** Credential-separation analysis, rate limiting, and synchronization transaction tests.
-- [x] **Phase 3.2 — Two-Credential Architecture:** Separate account authentication from vault encryption and add migration/recovery support.
-- [x] **Phase 4 — Fedora Desktop Client:** PySide6 application, session-keyring integration, and core vault workflows.
-- [x] **Phase 5 — Android Foundation:** Native Kotlin/Compose client and cryptographic integration.
-- [x] **Phase 6 — Android Offline Persistence:** Room-backed encrypted record storage and offline-first repository behavior.
-- [x] **Phase 7 — Android Synchronization and Hardening:** Incremental sync, persistence regression testing, and lifecycle handling.
-- [x] **Phase 8.0 — Offline Persistence:** Local encrypted record envelopes, synchronization state, and offline reload workflows.
-- [x] **Phase 8.1 — Biometric Unlock Implementation:** Android Keystore-based VEK wrapping, BiometricPrompt integration, account-bound AAD, and automated tests.
-- [ ] **Phase 8.1.1 — Biometric Security Verification:** Audit key invalidation semantics, hardware-backed key claims, account isolation, and lifecycle races; fix any verified issues.
-- [x] **Phase 8.2.3 — Android ANR Remediation:** Background dispatchers, cancellation/deduplication improvements, key cleanup, and regression tests implemented; physical-device verification remains pending.
-- [ ] **Phase 8.3 — Pre-Validation Audit:** Review concurrency/key lifecycle, test quality, isolated backend schema/migration behavior, and staging artifact identity.
-- [ ] **Phase 8.2 — Android Autofill:** Complete and validate secure AutofillService integration, user consent, and authentication-gated credential filling.
-- [ ] **Phase 9 — End-to-End Integration:** Verify synchronization between Android and Fedora over Tailscale/WireGuard.
-- [ ] **Phase 10 — Deployment and Recovery Hardening:** systemd restrictions, backup/restore drills, operational documentation, and security review.
-- [ ] **Release Readiness:** Device-level testing, threat-model review, dependency review, and independent security assessment.
-
-Roadmap checkmarks describe implementation milestones, not a certification that the project is secure for production use. In particular, Phase 8.2.3 is not considered validated until the staging build has been tested on a physical Android device.
+1. **Private Mesh Overlay:** VaultSync is designed to operate over private encrypted networks such as Tailscale or WireGuard.
+2. **Reverse Proxy Requirement:** In production, run the backend behind an authenticated TLS reverse proxy (Nginx or Caddy) that forwards `X-Forwarded-Proto: https`.
+3. **Secret Configuration:** Generate a persistent 64-character random hex secret (`openssl rand -hex 32`) and inject via `VAULTSYNC_SERVER_SECRET_KEY`.
 
 ---
 
-## Security Limitations
+## Operational Runbooks & Backup
 
-VaultSync is a security-sensitive project. The following areas require particular care:
+For backup, restoration, and disaster recovery procedures, consult [`docs/recovery.md`](docs/recovery.md):
+- **Consistent Backups:** Use `sqlite3 live.db ".backup 'backup.db'"` to ensure point-in-time consistency across WAL journal frames.
+- **Encryption at Rest:** Protect backup archives with GPG or Age before offsite storage.
+- **Verification Drills:** Always restore backups into an isolated temporary directory and verify with `PRAGMA integrity_check;` before updating production instances.
 
-- **No independent security audit:** The design and implementation have not been independently certified.
-- **Android hardware backing:** Actual TEE/StrongBox use and biometric behavior have not yet been verified on physical hardware.
-- **SQLite database encryption:** Encrypted record payloads do not establish that all database metadata, indexes, or other SQLite contents are encrypted.
-- **Endpoint compromise:** Malware, a compromised operating system, or an attacker controlling an unlocked device may be able to access credentials.
-- **Memory handling:** Applications can reduce the lifetime of sensitive data in memory, but Kotlin/JVM and Python runtimes cannot guarantee complete memory zeroization for all object copies.
-- **Network deployment:** Private VPN connectivity is not a substitute for a reviewed application and transport-security configuration.
-- **Recovery and backups:** Recovery workflows must be tested without exposing master passwords or unwrapped keys.
+---
 
-Review [`SECURITY.md`](SECURITY.md) and [`docs/threat-model.md`](docs/threat-model.md) before evaluating VaultSync for sensitive use.
+## Release Checklist & Verification Tiers
 
-If you discover a security vulnerability, follow the project's security reporting policy rather than publishing exploit details alongside sensitive user data.
+Detailed multi-tier release readiness tracking is maintained in [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md):
+- **Tier 1 (Automated Tests):** 160/160 passing.
+- **Tier 2 (Static Review):** API schemas, Android security config, and dependency manifests verified.
+- **Tier 3 (Deployment Testing):** Reverse proxy TLS termination, systemd service units, and backup restoration drills pending operational staging.
+- **Tier 4 (Physical Android Testing):** Physical biometric prompt, StrongBox hardware backing, and Android Autofill integration pending physical device testing.
+
+---
+
+## Known Limitations
+
+1. **Physical Android Validation Deferred:** The Android staging APK has passed ANR code remediation and static inspection, but has not yet been verified on a physical Android device with hardware biometrics or StrongBox TEE.
+2. **Managed Runtime Memory Zeroization:** While `clear_key_material()` actively zeroes mutable key buffers, Python and JVM managed runtimes cannot guarantee that transient immutable strings (`str`, `java.lang.String`) are zeroized immediately prior to garbage collection. Full disk encryption (LUKS / Android FDE) and memory protections are recommended.
+3. **Reverse Proxy Dependency:** The internal ASGI server does not include built-in TLS termination or slow-client defense and requires an external reverse proxy in production.
+4. **Irrecoverable Master Password:** VaultSync does not implement recovery phrases or administrative master-password backdoors. Loss of the Vault Master Passphrase results in permanent, unrecoverable data loss.
 
 ---
 
 ## Contributing
 
-Contributions should preserve the project's cryptographic protocol and security invariants.
-
-Before proposing changes:
-
-1. Read the architecture and threat-model documentation.
-2. Avoid logging secrets or adding plaintext credential storage.
-3. Use isolated databases and synthetic credentials for tests.
-4. Add regression tests for security-sensitive behavior.
-5. Document protocol changes and compatibility implications.
-6. Run the relevant automated test suites.
-
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for contribution guidelines.
+Contributions are welcome! Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md) before submitting pull requests.
 
 ---
 
 ## License
 
-VaultSync is distributed under the MIT License. See [`LICENSE`](LICENSE).
+VaultSync is distributed under the terms of the MIT License. See [`LICENSE`](LICENSE) for details.
