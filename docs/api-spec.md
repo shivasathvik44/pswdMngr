@@ -146,22 +146,32 @@ VaultSync enforces strict cryptographic credential separation between client-sid
   ```json
   {
     "wrapped_vault_key": "{\"version\":1,\"algorithm\":\"AES-256-GCM\",\"kdf\":{...},\"nonce\":\"...\",\"ciphertext\":\"...\"}",
-    "kdf_salt": "MDEyMzQ1Njc4OWFiY2RlZg=="
+    "kdf_salt": "MDEyMzQ1Njc4OWFiY2RlZg==",
+    "expected_version": 1,
+    "current_password": "AccountPassword123!"
   }
   ```
 - **Semantics**:
   - Used during master password rotation.
-  - Validates `WrappedKeyEnvelope` structure and optional fresh public `kdf_salt`.
-  - Replaces stored envelope and salt.
+  - Requires step-up authentication using the account password (`current_password`).
+  - Validates `WrappedKeyEnvelope` structure and consistency with public `kdf_salt`.
+  - Performs an atomic conditional database update enforcing `expected_version` to prevent concurrent or stale overwrites.
+  - Supports safe idempotent retries if a network disruption interrupts response delivery.
   - Encrypted records do not require re-encryption because the underlying VEK is preserved.
   - Account password and `account_password_hash` are unchanged.
 - **Response 200 OK**:
   ```json
   {
     "status": "ok",
-    "message": "Wrapped vault key updated successfully"
+    "message": "Wrapped vault key updated successfully",
+    "vault_key_version": 2
   }
   ```
+- **Error Responses**:
+  - `400 Bad Request`: Malformed JSON envelope, invalid salt encoding, or envelope salt does not match payload `kdf_salt`.
+  - `401 Unauthorized`: Invalid session token or incorrect account password.
+  - `409 Conflict`: Stale or mismatched `expected_version`.
+  - `429 Too Many Requests`: Rate limit exceeded for step-up authorization.
 
 #### `GET /api/v1/auth/vault-key`
 - **Headers**: `Authorization: Bearer <session_token>`
@@ -169,7 +179,8 @@ VaultSync enforces strict cryptographic credential separation between client-sid
   ```json
   {
     "wrapped_vault_key": "<json_string_wrapped_key_envelope_or_null>",
-    "kdf_salt": "MDEyMzQ1Njc4OWFiY2RlZg=="
+    "kdf_salt": "MDEyMzQ1Njc4OWFiY2RlZg==",
+    "vault_key_version": 1
   }
   ```
 - **Error Responses**:
@@ -237,7 +248,7 @@ VaultSync enforces strict cryptographic credential separation between client-sid
   ```
 
 #### `PUT /api/v1/records/{record_id}`
-- **Optimistic Concurrency**: Requires client to supply `expected_revision`. If `expected_revision != record.revision`, the server rejects the update with `409 Conflict`.
+- **Atomic Optimistic Concurrency**: Requires client to supply `expected_revision`. The server updates the record atomically via a database conditional `WHERE revision = expected_revision AND is_deleted = false` clause. If the condition is not met, the update is rejected with `409 Conflict`, leaving the record and cursor completely unchanged.
 - **Request Body**:
   ```json
   {
@@ -265,7 +276,8 @@ VaultSync enforces strict cryptographic credential separation between client-sid
   ```
 
 #### `DELETE /api/v1/records/{record_id}?expected_revision=2`
-- **Tombstone Semantics**: Does not physically drop the row. Sets `is_deleted = true`, purges `ciphertext_payload = ""`, increments `revision = revision + 1`, and increments `sync_cursor`.
+- **Mandatory Revision Guard**: Requires `expected_revision` query parameter. Omitting it returns `400 Bad Request`.
+- **Tombstone Semantics**: Atomically checks `revision = expected_revision AND is_deleted = false`. Sets `is_deleted = true`, purges `ciphertext_payload = ""`, increments `revision = revision + 1`, and allocates next `sync_cursor`.
 - **Response 200 OK**:
   ```json
   {
@@ -275,15 +287,22 @@ VaultSync enforces strict cryptographic credential separation between client-sid
     "is_deleted": true
   }
   ```
+- **Error Responses**:
+  - `400 Bad Request`: Missing `expected_revision` query parameter.
+  - `404 Not Found`: Record does not exist or is already deleted.
+  - `409 Conflict`: Stale `expected_revision` does not match server revision.
 
 ---
 
 ## 3.4 Synchronization Cursor & Pagination
 
 #### `GET /api/v1/sync?since_cursor=0&limit=100`
+- **Synchronization Model**: VaultSync operates a **latest-state synchronization model**, NOT an immutable event ledger or point-in-time rollback system. Each record mutation overwrites previous ciphertext; only the latest state or tombstone is retained.
 - **Query Parameters**:
-  - `since_cursor` (int, default 0): The client's last observed sync cursor. Returns all modifications with `sync_cursor > since_cursor`.
+  - `since_cursor` (int, default 0): The client's last observed sync cursor. Returns all modifications with `sync_cursor > since_cursor`. Must not exceed current `server_cursor`.
   - `limit` (int, default 100, max 500): Maximum records per batch.
+- **Error Responses**:
+  - `400 Bad Request`: `since_cursor` exceeds current `server_cursor`. Client must resynchronize from cursor 0.
 - **Response 200 OK**:
   ```json
   {

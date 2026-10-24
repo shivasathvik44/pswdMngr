@@ -53,6 +53,8 @@ class VaultSession:
         self.session_token: Optional[str] = None
         self.kdf_salt: str = ""
         self.wrapped_vault_key: str = ""
+        self.vault_key_version: int = 1
+        self._account_password: Optional[str] = None
 
         # Vault state (only populated when unlocked)
         self.is_unlocked: bool = False
@@ -145,6 +147,8 @@ class VaultSession:
             self.account_id = ""
             self.kdf_salt = ""
             self.wrapped_vault_key = ""
+            self.vault_key_version = 1
+            self._account_password = None
             self.lock()
 
     # ------------------------------------------------------------------------
@@ -169,6 +173,8 @@ class VaultSession:
             kdf_salt=salt_b64,
             wrapped_vault_key=wrapped_env_json,
         )
+        self._account_password = account_password
+        self.vault_key_version = 1
         # Clean up temporary VEK
         clear_key_material(vek)
 
@@ -188,6 +194,8 @@ class VaultSession:
         self.session_token = data.get("session_token", "")
         self.kdf_salt = data.get("kdf_salt", "")
         self.wrapped_vault_key = data.get("wrapped_vault_key", "")
+        self.vault_key_version = data.get("vault_key_version", 1)
+        self._account_password = account_password
 
         # Persist session token in secure OS Keyring
         self.storage.save_session_token(username, self.session_token)
@@ -396,17 +404,28 @@ class VaultSession:
         """Change server account password via PUT /api/v1/auth/password."""
         await self.api.change_account_password(current_password, new_password)
 
-    async def rotate_vault_master_password(self, new_master_password: str) -> None:
+    async def rotate_vault_master_password(self, new_master_password: str, account_password: Optional[str] = None) -> None:
         """Re-wrap existing VEK with new master password and update server.
         
         Preserves raw VEK so encrypted records do not need re-encryption.
+        Requires account password for step-up authorization and passes expected_version.
         """
         if not self.is_unlocked or not self._vault_key:
             raise ApiError("Vault must be unlocked to rotate master password.")
 
+        acc_pw = account_password or self._account_password
+        if not acc_pw:
+            raise ApiError("Account password required for step-up authorization to rotate master password.")
+
         gen = self.lock_generation
         new_salt_b64, new_envelope_json = rotate_master_password(self._vault_key, new_master_password)
-        await self.api.update_vault_key(wrapped_vault_key=new_envelope_json, kdf_salt=new_salt_b64)
+        res = await self.api.update_vault_key(
+            wrapped_vault_key=new_envelope_json,
+            kdf_salt=new_salt_b64,
+            expected_version=self.vault_key_version,
+            current_password=acc_pw,
+        )
         # Server accepted new wrapped key; synchronize local metadata immediately
         self.kdf_salt = new_salt_b64
         self.wrapped_vault_key = new_envelope_json
+        self.vault_key_version = res.get("vault_key_version", self.vault_key_version + 1)

@@ -34,7 +34,8 @@ data class LoginResponse(
     @SerialName("account_id") val accountId: String,
     @SerialName("expires_at") val expiresAt: String,
     @SerialName("kdf_salt") val kdfSalt: String,
-    @SerialName("wrapped_vault_key") val wrappedVaultKey: String? = null
+    @SerialName("wrapped_vault_key") val wrappedVaultKey: String? = null,
+    @SerialName("vault_key_version") val vaultKeyVersion: Int = 1
 )
 
 @Serializable
@@ -46,13 +47,23 @@ data class SaltResponse(
 @Serializable
 data class VaultKeyResponse(
     @SerialName("wrapped_vault_key") val wrappedVaultKey: String? = null,
-    @SerialName("kdf_salt") val kdfSalt: String
+    @SerialName("kdf_salt") val kdfSalt: String,
+    @SerialName("vault_key_version") val vaultKeyVersion: Int = 1
 )
 
 @Serializable
 data class UpdateVaultKeyRequest(
     @SerialName("wrapped_vault_key") val wrappedVaultKey: String,
-    @SerialName("kdf_salt") val kdfSalt: String
+    @SerialName("kdf_salt") val kdfSalt: String,
+    @SerialName("expected_version") val expectedVersion: Int,
+    @SerialName("current_password") val currentPassword: String
+)
+
+@Serializable
+data class UpdateVaultKeyResponse(
+    val status: String? = null,
+    val message: String? = null,
+    @SerialName("vault_key_version") val vaultKeyVersion: Int = 1
 )
 
 @Serializable

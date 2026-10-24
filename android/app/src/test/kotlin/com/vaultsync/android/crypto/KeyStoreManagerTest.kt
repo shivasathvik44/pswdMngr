@@ -92,4 +92,11 @@ class KeyStoreManagerTest {
         assertFalse(f.writes.contains("synthetic-token"))
         assertTrue(f.values.isEmpty())
     }
+
+    @Test fun testVaultKeyVersionPersistenceAndDefault() {
+        val manager = KeyStoreManager(context = null)
+        assertEquals(1, manager.lastVaultKeyVersion)
+        manager.lastVaultKeyVersion = 3
+        assertEquals(3, manager.lastVaultKeyVersion)
+    }
 }

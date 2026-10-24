@@ -131,6 +131,7 @@ erDiagram
 
 ### 1. Account Entity (`accounts`)
 - Stores account identity, the server-side Argon2id hash of `account_password`, the public KDF salt, and the wrapped vault key envelope.
+- Tracks `vault_key_version` to enforce version locking and step-up auth on key envelope replacements.
 - Manages an account-level monotonic `sync_cursor` incremented on every record mutation.
 - Tracks `requires_password_migration` flag for legacy accounts.
 
@@ -142,8 +143,8 @@ erDiagram
 ### 3. Encrypted Records Entity (`encrypted_records`)
 - Stores client-encrypted `EncryptedRecordEnvelope` JSON blobs.
 - Enforces multi-tenant isolation via compound unique constraint `(account_id, record_id)`.
-- **Optimistic Concurrency**: Tracks per-record monotonic `revision`. Updates require matching `expected_revision`.
-- **Tombstones**: Record deletions set `is_deleted = true`, purge `ciphertext_payload = ""`, and increment `revision` and `sync_cursor`.
+- **Atomic Optimistic Concurrency**: Enforces database-level conditional updates using `expected_revision`. Competing writes are rejected atomically without cursor drift.
+- **Tombstones & Latest-State Synchronization**: Record deletions set `is_deleted = true`, purge `ciphertext_payload = ""`, and increment `revision` and `sync_cursor`. VaultSync provides a **latest-state synchronization model**, NOT an immutable event history or point-in-time recovery ledger; previous record states are overwritten.
 
 ---
 

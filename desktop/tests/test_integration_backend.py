@@ -10,6 +10,7 @@ import pytest
 from httpx import ASGITransport
 from sqlalchemy.orm import sessionmaker
 
+from vaultsync_server.config import settings
 from vaultsync_server.crypto.envelope import EncryptedRecordEnvelope, WrappedKeyEnvelope
 from vaultsync_server.crypto.errors import DecryptionFailedError
 from vaultsync_server.crypto.records import decrypt_record
@@ -81,7 +82,7 @@ async def test_real_backend_health_and_two_credential_registration(make_session)
     # 1. Health check
     health = await client_session.api.check_health()
     assert health["status"] == "ok"
-    assert health["version"] == "0.1.0"
+    assert health["version"] == settings.app_version
 
     # 2. Register account (Alice)
     # Master password never leaves client

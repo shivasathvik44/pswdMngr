@@ -96,6 +96,7 @@ open class ApiClient(
             404 -> throw NotFoundException(detailMessage)
             409 -> throw ConflictException(detailMessage)
             413 -> throw PayloadTooLargeException(detailMessage)
+            422 -> throw ValidationException(detailMessage)
             429 -> throw RateLimitException(detailMessage)
             else -> throw ApiException(detailMessage, response.code)
         }
@@ -151,7 +152,7 @@ open class ApiClient(
         return json.decodeFromString(res)
     }
 
-    open suspend fun updateVaultKey(req: UpdateVaultKeyRequest): StandardResponse {
+    open suspend fun updateVaultKey(req: UpdateVaultKeyRequest): UpdateVaultKeyResponse {
         val reqBody = json.encodeToString(req).toRequestBody(jsonMediaType)
         val request = newRequestBuilder("/api/v1/auth/vault-key").put(reqBody).build()
         val res = executeRequest(request)

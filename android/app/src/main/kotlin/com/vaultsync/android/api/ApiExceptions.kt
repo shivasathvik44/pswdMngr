@@ -12,6 +12,8 @@ class ConflictException(message: String = "Concurrency conflict: record was modi
 
 class PayloadTooLargeException(message: String = "Payload exceeds server size limit (2 MiB)") : ApiException(message, 413)
 
+class ValidationException(message: String = "Validation error: invalid request payload") : ApiException(message, 422)
+
 class RateLimitException(message: String = "Rate limit exceeded. Please wait before retrying.") : ApiException(message, 429)
 
 class NetworkConnectionException(message: String, cause: Throwable? = null) : ApiException(message)

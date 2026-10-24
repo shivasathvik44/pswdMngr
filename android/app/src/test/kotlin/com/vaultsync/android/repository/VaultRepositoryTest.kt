@@ -2,6 +2,7 @@ package com.vaultsync.android.repository
 
 import com.vaultsync.android.api.ApiClient
 import com.vaultsync.android.api.AuthenticationException
+import com.vaultsync.android.api.ConflictException
 import com.vaultsync.android.api.CreateRecordRequest
 import com.vaultsync.android.api.LoginRequest
 import com.vaultsync.android.api.LoginResponse
@@ -9,6 +10,9 @@ import com.vaultsync.android.api.NetworkConnectionException
 import com.vaultsync.android.api.RecordResponse
 import com.vaultsync.android.api.SyncResponse
 import com.vaultsync.android.api.UpdateRecordRequest
+import com.vaultsync.android.api.UpdateVaultKeyRequest
+import com.vaultsync.android.api.UpdateVaultKeyResponse
+import com.vaultsync.android.api.ValidationException
 import com.vaultsync.android.crypto.KeyStoreManager
 import com.vaultsync.android.crypto.RecordEnvelope
 import com.vaultsync.android.crypto.SecureStorageException
@@ -61,9 +65,18 @@ class VaultRepositoryTest {
         var loginCallCount: Int = 0
         var loginResponseToReturn: LoginResponse? = null
 
+        var updateVaultKeyPauseDeferred: CompletableDeferred<Unit>? = null
+        var updateVaultKeyStartedDeferred: CompletableDeferred<Unit>? = null
+        var updateVaultKeyCallCount: Int = 0
+        var lastUpdateVaultKeyRequest: UpdateVaultKeyRequest? = null
+        var updateVaultKeyResponseToReturn: UpdateVaultKeyResponse? = null
+        var updateVaultKeyExceptionToThrow: Exception? = null
+
         fun resetCounters() {
             syncCallCount = 0
             requestedSinceCursors.clear()
+            updateVaultKeyCallCount = 0
+            lastUpdateVaultKeyRequest = null
         }
 
         override suspend fun fetchSync(sinceCursor: Int, limit: Int): SyncResponse {
@@ -119,7 +132,21 @@ class VaultRepositoryTest {
                 accountId = "acc-${req.username}",
                 expiresAt = "2026-10-15T12:00:00Z",
                 kdfSalt = "c2FsdA==",
-                wrappedVaultKey = "{\"version\":1}"
+                wrappedVaultKey = "{\"version\":1}",
+                vaultKeyVersion = 1
+            )
+        }
+
+        override suspend fun updateVaultKey(req: UpdateVaultKeyRequest): UpdateVaultKeyResponse {
+            updateVaultKeyCallCount++
+            lastUpdateVaultKeyRequest = req
+            updateVaultKeyStartedDeferred?.complete(Unit)
+            updateVaultKeyPauseDeferred?.await()
+            updateVaultKeyExceptionToThrow?.let { throw it }
+            return updateVaultKeyResponseToReturn ?: UpdateVaultKeyResponse(
+                status = "ok",
+                message = "Wrapped vault key updated successfully",
+                vaultKeyVersion = req.expectedVersion + 1
             )
         }
     }
@@ -135,7 +162,11 @@ class VaultRepositoryTest {
         )
     }
 
-    private fun unlockRepositoryDirectly(repo: VaultRepository, masterPass: String = "TestPass123!") {
+    private fun unlockRepositoryDirectly(
+        repo: VaultRepository,
+        masterPass: String = "TestPass123!",
+        accountPass: String? = "TestAccountPass123!"
+    ) {
         val vek = VaultCrypto.generateVaultKey()
         val (saltBytes, envelope) = VaultCrypto.wrapVaultKey(vek, masterPass)
         val saltB64 = Base64.getEncoder().encodeToString(saltBytes)
@@ -151,6 +182,16 @@ class VaultRepositoryTest {
         val saltField = repo.javaClass.getDeclaredField("kdfSalt")
         saltField.isAccessible = true
         saltField.set(repo, saltB64)
+
+        repo.keyStoreManager.lastWrappedVaultKey = envelopeJson
+        repo.keyStoreManager.lastKdfSalt = saltB64
+        repo.keyStoreManager.lastVaultKeyVersion = 1
+
+        if (accountPass != null) {
+            val accPassField = repo.javaClass.getDeclaredField("_accountPassword")
+            accPassField.isAccessible = true
+            accPassField.set(repo, accountPass)
+        }
 
         runBlocking {
             repo.unlockVault(masterPass)
@@ -1045,5 +1086,212 @@ class VaultRepositoryTest {
         val restored = VaultRepository(fakeApi, brokenStorage, VaultCrypto)
         assertFalse(restored.sessionState.value.isAuthenticated)
         assertNull(fakeApi.sessionToken)
+    }
+
+    @Test
+    fun testRotateMasterPasswordSuccessSubmitsExpectedVersionAndAccountPassword() = runBlocking {
+        unlockRepositoryDirectly(repository, "CurrentMasterPass123!", "AccountStepUpPass456!")
+        assertEquals(1, repository.vaultKeyVersion)
+        val initialWrappedKey = repository.wrappedVaultKey
+        val initialSalt = repository.kdfSalt
+
+        repository.rotateMasterPassword("NewMasterPassword789!")
+
+        assertEquals(1, fakeApi.updateVaultKeyCallCount)
+        val sentReq = fakeApi.lastUpdateVaultKeyRequest
+        assertNotNull(sentReq)
+        assertEquals(1, sentReq!!.expectedVersion)
+        assertEquals("AccountStepUpPass456!", sentReq.currentPassword)
+        assertFalse(sentReq.wrappedVaultKey.isBlank())
+        assertFalse(sentReq.kdfSalt.isBlank())
+        assertFalse(sentReq.wrappedVaultKey == initialWrappedKey)
+
+        assertEquals(2, repository.vaultKeyVersion)
+        assertEquals(sentReq.wrappedVaultKey, repository.wrappedVaultKey)
+        assertEquals(sentReq.kdfSalt, repository.kdfSalt)
+        assertEquals(2, keyStoreManager.lastVaultKeyVersion)
+        assertEquals(sentReq.wrappedVaultKey, keyStoreManager.lastWrappedVaultKey)
+        assertEquals(sentReq.kdfSalt, keyStoreManager.lastKdfSalt)
+    }
+
+    @Test
+    fun testRotateMasterPasswordWithExplicitAccountPasswordOverridesInMemory() = runBlocking {
+        unlockRepositoryDirectly(repository, "CurrentMasterPass123!", "DefaultAccountPass!")
+        assertEquals(1, repository.vaultKeyVersion)
+
+        repository.rotateMasterPassword("NewMasterPassword789!", accountPassword = "ExplicitStepUpPass!")
+
+        assertEquals(1, fakeApi.updateVaultKeyCallCount)
+        val sentReq = fakeApi.lastUpdateVaultKeyRequest
+        assertNotNull(sentReq)
+        assertEquals(1, sentReq!!.expectedVersion)
+        assertEquals("ExplicitStepUpPass!", sentReq.currentPassword)
+        assertEquals(2, repository.vaultKeyVersion)
+    }
+
+    @Test
+    fun testRotateMasterPasswordThrowsWhenNoAccountPasswordAvailable() {
+        unlockRepositoryDirectly(repo = repository, masterPass = "CurrentMasterPass123!", accountPass = null)
+        val initialKey = repository.wrappedVaultKey
+        val initialVersion = repository.vaultKeyVersion
+
+        val ex = assertThrows(IllegalStateException::class.java) {
+            runBlocking {
+                repository.rotateMasterPassword("NewMasterPassword789!")
+            }
+        }
+        assertTrue(ex.message!!.contains("Account password required for step-up auth"))
+        assertEquals(0, fakeApi.updateVaultKeyCallCount)
+        assertEquals(initialKey, repository.wrappedVaultKey)
+        assertEquals(initialVersion, repository.vaultKeyVersion)
+    }
+
+    @Test
+    fun testRotateMasterPasswordConflict409PreservesLocalState() {
+        unlockRepositoryDirectly(repository, "CurrentMasterPass123!", "AccountStepUpPass456!")
+        val initialWrappedKey = repository.wrappedVaultKey
+        val initialSalt = repository.kdfSalt
+        val initialVersion = repository.vaultKeyVersion
+        assertEquals(1, initialVersion)
+
+        fakeApi.updateVaultKeyExceptionToThrow = ConflictException(
+            "Conflict: expected vault key version 1, but current version is 2"
+        )
+
+        val ex = assertThrows(ConflictException::class.java) {
+            runBlocking {
+                repository.rotateMasterPassword("NewMasterPassword789!")
+            }
+        }
+        assertEquals(409, ex.statusCode)
+        assertTrue(ex.message!!.contains("Conflict"))
+
+        // Invariants: Local state, version, and Keystore metadata remain completely unchanged
+        assertEquals(initialVersion, repository.vaultKeyVersion)
+        assertEquals(initialWrappedKey, repository.wrappedVaultKey)
+        assertEquals(initialSalt, repository.kdfSalt)
+        assertEquals(initialVersion, keyStoreManager.lastVaultKeyVersion)
+        assertEquals(initialWrappedKey, keyStoreManager.lastWrappedVaultKey)
+        assertEquals(initialSalt, keyStoreManager.lastKdfSalt)
+    }
+
+    @Test
+    fun testRotateMasterPasswordValidation422PreservesLocalState() {
+        unlockRepositoryDirectly(repository, "CurrentMasterPass123!", "AccountStepUpPass456!")
+        val initialWrappedKey = repository.wrappedVaultKey
+        val initialSalt = repository.kdfSalt
+        val initialVersion = repository.vaultKeyVersion
+
+        fakeApi.updateVaultKeyExceptionToThrow = ValidationException(
+            "Validation error: expected_version must be greater than or equal to 0"
+        )
+
+        val ex = assertThrows(ValidationException::class.java) {
+            runBlocking {
+                repository.rotateMasterPassword("NewMasterPassword789!")
+            }
+        }
+        assertEquals(422, ex.statusCode)
+
+        // Invariants: Local state remains untouched
+        assertEquals(initialVersion, repository.vaultKeyVersion)
+        assertEquals(initialWrappedKey, repository.wrappedVaultKey)
+        assertEquals(initialSalt, repository.kdfSalt)
+        assertEquals(initialVersion, keyStoreManager.lastVaultKeyVersion)
+    }
+
+    @Test
+    fun testRotateMasterPasswordInterruptedNetworkRetrySafe() = runBlocking {
+        unlockRepositoryDirectly(repository, "CurrentMasterPass123!", "AccountStepUpPass456!")
+        val initialWrappedKey = repository.wrappedVaultKey
+        val initialSalt = repository.kdfSalt
+        assertEquals(1, repository.vaultKeyVersion)
+
+        // Step 1: Simulate network drop before response arrives
+        fakeApi.updateVaultKeyExceptionToThrow = NetworkConnectionException("Connection timeout")
+        assertThrows(NetworkConnectionException::class.java) {
+            runBlocking {
+                repository.rotateMasterPassword("NewMasterPassword789!")
+            }
+        }
+
+        // Local state was not updated on error
+        assertEquals(1, repository.vaultKeyVersion)
+        assertEquals(initialWrappedKey, repository.wrappedVaultKey)
+        assertEquals(initialSalt, repository.kdfSalt)
+
+        // Step 2: Retry with network restored (server idempotent response returns version 2)
+        fakeApi.updateVaultKeyExceptionToThrow = null
+        repository.rotateMasterPassword("NewMasterPassword789!")
+
+        // Retry must still submit the original expectedVersion = 1
+        assertEquals(2, fakeApi.updateVaultKeyCallCount)
+        assertEquals(1, fakeApi.lastUpdateVaultKeyRequest!!.expectedVersion)
+        assertEquals(2, repository.vaultKeyVersion)
+        assertEquals(2, keyStoreManager.lastVaultKeyVersion)
+        assertFalse(repository.wrappedVaultKey == initialWrappedKey)
+    }
+
+    @Test
+    fun testLoginInitializesVaultKeyVersionAndPropagatesToRotation() = runBlocking {
+        fakeApi.loginResponseToReturn = LoginResponse(
+            sessionToken = "tok-versioned",
+            sessionId = "sess-versioned",
+            accountId = "acc-versioned",
+            expiresAt = "2026-10-15T12:00:00Z",
+            kdfSalt = "c2FsdDE2Ynl0ZXNhbHQ=",
+            wrappedVaultKey = "{\"version\":1}",
+            vaultKeyVersion = 5
+        )
+
+        repository.loginAccount("alice", "AliceAccPassword999!")
+
+        assertEquals(5, repository.vaultKeyVersion)
+        assertEquals(5, keyStoreManager.lastVaultKeyVersion)
+
+        // Directly unlock with simulated VEK
+        val vek = VaultCrypto.generateVaultKey()
+        val (saltBytes, envelope) = VaultCrypto.wrapVaultKey(vek, "AliceMasterPass123!")
+        val saltB64 = Base64.getEncoder().encodeToString(saltBytes)
+        val envelopeJson = VaultCrypto.serializeWrappedKeyEnvelope(envelope)
+        val field = repository.javaClass.getDeclaredField("wrappedVaultKey")
+        field.isAccessible = true
+        field.set(repository, envelopeJson)
+        val saltField = repository.javaClass.getDeclaredField("kdfSalt")
+        saltField.isAccessible = true
+        saltField.set(repository, saltB64)
+        repository.unlockVault("AliceMasterPass123!")
+
+        // Rotate master password: must submit expectedVersion = 5 and currentPassword = "AliceAccPassword999!"
+        repository.rotateMasterPassword("AliceNewMasterPass777!")
+
+        assertEquals(1, fakeApi.updateVaultKeyCallCount)
+        val sentReq = fakeApi.lastUpdateVaultKeyRequest
+        assertNotNull(sentReq)
+        assertEquals(5, sentReq!!.expectedVersion)
+        assertEquals("AliceAccPassword999!", sentReq.currentPassword)
+        assertEquals(6, repository.vaultKeyVersion)
+        assertEquals(6, keyStoreManager.lastVaultKeyVersion)
+    }
+
+    @Test
+    fun testLogoutAndAuthFailureResetVaultKeyVersionAndAccountPassword() {
+        runBlocking {
+            unlockRepositoryDirectly(repository, "CurrentMasterPass123!", "AccountStepUpPass456!")
+            assertEquals(1, repository.vaultKeyVersion)
+
+            // Logout
+            repository.logout()
+
+            assertEquals(1, repository.vaultKeyVersion)
+            assertEquals(1, keyStoreManager.lastVaultKeyVersion)
+
+            // Rotating while locked/logged out must fail
+            assertThrows(IllegalStateException::class.java) {
+                runBlocking {
+                    repository.rotateMasterPassword("ShouldFailPass!")
+                }
+            }
+        }
     }
 }

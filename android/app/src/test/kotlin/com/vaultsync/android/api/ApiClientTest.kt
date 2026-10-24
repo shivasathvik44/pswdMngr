@@ -177,4 +177,100 @@ class ApiClientTest {
             ApiClient(baseUrl = remoteHttpUrl)
         }
     }
+
+    @Test
+    fun testUpdateVaultKeySerializationAndResponse() = runBlocking {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"status\":\"ok\",\"message\":\"Wrapped vault key updated successfully\",\"vault_key_version\":3}")
+        )
+
+        val resp = client.updateVaultKey(
+            UpdateVaultKeyRequest(
+                wrappedVaultKey = "{\"alg\":\"AES-256-GCM\"}",
+                kdfSalt = "c2FsdDEyMzQ1Njc4OQ==",
+                expectedVersion = 2,
+                currentPassword = "testAccountPassword123!"
+            )
+        )
+
+        assertEquals("ok", resp.status)
+        assertEquals(3, resp.vaultKeyVersion)
+
+        val recordedRequest = server.takeRequest()
+        assertEquals("/api/v1/auth/vault-key", recordedRequest.path)
+        assertEquals("PUT", recordedRequest.method)
+        val body = recordedRequest.body.readUtf8()
+        assertTrue("Request body must include wrapped_vault_key", body.contains("\"wrapped_vault_key\":\"{\\\"alg\\\":\\\"AES-256-GCM\\\"}\""))
+        assertTrue("Request body must include kdf_salt", body.contains("\"kdf_salt\":\"c2FsdDEyMzQ1Njc4OQ==\""))
+        assertTrue("Request body must include expected_version", body.contains("\"expected_version\":2"))
+        assertTrue("Request body must include current_password", body.contains("\"current_password\":\"testAccountPassword123!\""))
+    }
+
+    @Test
+    fun testUpdateVaultKeyConflict409ThrowsConflictException() {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(409)
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"detail\":\"Conflict: expected vault key version 1, but current version is 2\"}")
+        )
+
+        val ex = assertThrows(ConflictException::class.java) {
+            runBlocking {
+                client.updateVaultKey(
+                    UpdateVaultKeyRequest(
+                        wrappedVaultKey = "{\"alg\":\"AES-256-GCM\"}",
+                        kdfSalt = "c2FsdDEyMzQ1Njc4OQ==",
+                        expectedVersion = 1,
+                        currentPassword = "testAccountPassword123!"
+                    )
+                )
+            }
+        }
+        assertEquals(409, ex.statusCode)
+        assertTrue(ex.message!!.contains("Conflict"))
+    }
+
+    @Test
+    fun testUpdateVaultKeyValidation422ThrowsValidationException() {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(422)
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"detail\":\"Validation error: expected_version must be greater than or equal to 0\"}")
+        )
+
+        val ex = assertThrows(ValidationException::class.java) {
+            runBlocking {
+                client.updateVaultKey(
+                    UpdateVaultKeyRequest(
+                        wrappedVaultKey = "{\"alg\":\"AES-256-GCM\"}",
+                        kdfSalt = "c2FsdDEyMzQ1Njc4OQ==",
+                        expectedVersion = -1,
+                        currentPassword = "testAccountPassword123!"
+                    )
+                )
+            }
+        }
+        assertEquals(422, ex.statusCode)
+        assertTrue(ex.message!!.contains("Validation error"))
+    }
+
+    @Test
+    fun testGetVaultKeyDeserializesVaultKeyVersion() = runBlocking {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"wrapped_vault_key\":\"{\\\"version\\\":1}\",\"kdf_salt\":\"c2FsdA==\",\"vault_key_version\":4}")
+        )
+
+        val resp = client.getVaultKey()
+        assertEquals(4, resp.vaultKeyVersion)
+        assertEquals("c2FsdA==", resp.kdfSalt)
+        assertEquals("{\"version\":1}", resp.wrappedVaultKey)
+    }
 }

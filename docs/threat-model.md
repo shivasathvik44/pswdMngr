@@ -69,19 +69,23 @@ This document identifies security boundaries, adversaries, potential threats, de
 ### 2.6 Malicious or Compromised Clients
 - **Threat**: A compromised client uploads corrupted data, malicious blobs, or oversized payloads to exhaust server disk space.
 - **Mitigation**:
-  - Strict Pydantic payload validation limits blob sizes and schema compliance.
+  - Strict Pydantic payload validation limits blob sizes and schema compliance (maximum 2 MiB per record).
   - Rate limiting per session and per IP.
-  - Server maintains immutable revision history / version cursors so rollbacks can recover from malicious deletions.
-- **Limitations**: A compromised client possessing the master password has legitimate cryptographic access to write valid ciphertext to the vault.
+  - Atomic optimistic concurrency and mandatory expected revision on deletion prevent stale or concurrent overwrites.
+- **Limitations**:
+  - VaultSync implements a **latest-state synchronization model**, NOT an immutable audit ledger or point-in-time recovery system. Intermediate record revisions are overwritten by subsequent updates; the database does not maintain historical versions or durable rollback history.
+  - A compromised client possessing the vault master password has legitimate cryptographic access to write valid ciphertext to the vault or tombstone records.
 
-### 2.7 Concurrent Updates and Replayed Sync Requests
-- **Threat**: Two devices modify the same record offline, or an attacker replays older synchronization requests.
+### 2.7 Concurrent Updates, Replays, and Rollback Boundaries
+- **Threat**: Two devices modify the same record offline, or an attacker attempts to replay older synchronization requests.
 - **Mitigation**:
-  - Version cursors and monotonic record revision numbers.
-  - Optimistic locking and conflict detection: updates require matching expected base revision.
-  - Tombstones with revision tracking prevent deleted records from resurrecting on delayed sync.
-  - Replayed requests are rejected idempotently using deterministic client mutation UUIDs.
-- **Limitations**: True concurrent edits require user resolution (forking into a conflict record) rather than automated field-level merging, as the server cannot read fields inside ciphertext.
+  - Monotonic account-level sync cursors and atomic per-record revision increments.
+  - Atomic database-level conditional writes (`WHERE revision = expected_revision AND is_deleted = false`) reject stale updates with `409 Conflict`.
+  - Mandatory `expected_revision` parameter on `DELETE` ensures deletions cannot destroy newer revisions.
+  - Durable tombstones ensure deleted records propagate consistently to offline clients during incremental catch-up sync.
+- **Limitations & Cryptographic Boundaries**:
+  - Record-level Authenticated Additional Data (AAD) binds ciphertext strictly to its `record_id`, preventing cross-record relocation. However, **AAD alone does not prevent an untrusted server from replaying an earlier valid ciphertext for that same record ID**; freshness verification depends on client-side revision checks.
+  - True concurrent edits to the same item require user resolution rather than automatic field-level merging, as the server cannot inspect fields within the opaque ciphertext.
 
 ### 2.8 Corrupted Ciphertext and Invalid Input
 - **Threat**: Bit rot, storage faults, or tampering produces altered ciphertext.

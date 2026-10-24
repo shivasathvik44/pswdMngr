@@ -28,6 +28,7 @@ open class KeyStoreManager(private val context: Context? = null) {
         private const val PREF_LAST_ACCOUNT_ID = "last_account_id"
         private const val PREF_WRAPPED_VAULT_KEY = "wrapped_vault_key"
         private const val PREF_KDF_SALT = "kdf_salt"
+        private const val PREF_VAULT_KEY_VERSION = "vault_key_version"
         private const val PREF_AUTO_LOCK_MINUTES = "auto_lock_minutes"
         private const val PREF_CLIPBOARD_CLEAR_SECONDS = "clipboard_clear_seconds"
         private const val PREF_AUTOFILL_ENABLED = "autofill_enabled"
@@ -185,6 +186,14 @@ open class KeyStoreManager(private val context: Context? = null) {
                 prefs?.edit()?.remove(PREF_KDF_SALT)?.apply()
                 inMemoryFallback.remove(PREF_KDF_SALT)
             }
+        }
+
+    open var lastVaultKeyVersion: Int
+        get() = prefs?.getInt(PREF_VAULT_KEY_VERSION, 1)
+            ?: (inMemoryFallback[PREF_VAULT_KEY_VERSION] as? Int ?: 1)
+        set(value) {
+            prefs?.edit()?.putInt(PREF_VAULT_KEY_VERSION, value)?.apply()
+            inMemoryFallback[PREF_VAULT_KEY_VERSION] = value
         }
 
     open var autoLockMinutes: Int

@@ -138,12 +138,13 @@ All encrypted envelopes are serialized as canonical JSON structures with Base64 
 }
 ```
 
-### 5.3 Authenticated Associated Data (AAD) Binding
+### 5.3 Authenticated Associated Data (AAD) Binding & Replay Boundaries
 
 To prevent **ciphertext relocation attacks** (where an attacker moves ciphertext from one record to another without decrypting it):
 - Record encryption strictly binds the `record_id` and protocol version into the AEAD Associated Data:
   $$\text{AAD}_{\text{record}} = \text{b"vaultsync:record:v1:"} \mathbin{\Vert} \text{record\_id.encode('utf-8')}$$
-- Decryption calculates $\text{AAD}_{\text{record}}$ from the envelope's `record_id`. If an adversary alters the `record_id` or swaps ciphertexts, the authentication tag verification fails.
+- Decryption calculates $\text{AAD}_{\text{record}}$ from the envelope's `record_id`. If an adversary alters the `record_id` or swaps ciphertexts across different items, the authentication tag verification fails.
+- **Cryptographic Boundary (Freshness vs. Relocation)**: AAD binding strictly proves that the ciphertext was created for this specific `record_id`. However, **AAD alone does not prevent an untrusted or compromised server from replaying an older, previously valid ciphertext for that same record_id** (rollback attack), because both the older and newer ciphertexts were legitimately encrypted under the same VEK and same record AAD. Freshness and rollback detection rely on higher-level revision tracking and client-side revision verification, not record-level AAD alone.
 
 ---
 

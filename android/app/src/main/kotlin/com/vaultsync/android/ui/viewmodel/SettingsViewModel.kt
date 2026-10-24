@@ -97,7 +97,7 @@ class SettingsViewModel(
         }
     }
 
-    fun rotateMasterPassword(currentMaster: String, newMaster: String, confirmMaster: String) {
+    fun rotateMasterPassword(currentMaster: String, newMaster: String, confirmMaster: String, accountPassword: String? = null) {
         if (_uiState.value.isLoading) return
         if (currentMaster.isEmpty()) {
             _uiState.value = _uiState.value.copy(errorMessage = "Current master password is required")
@@ -117,7 +117,7 @@ class SettingsViewModel(
             val currentChars = currentMaster.toCharArray()
             val newChars = newMaster.toCharArray()
             try {
-                repository.rotateMasterPassword(currentChars, newChars)
+                repository.rotateMasterPassword(currentChars, newChars, accountPassword)
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
                     showRotateMasterPasswordDialog = false,

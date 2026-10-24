@@ -3,12 +3,15 @@ package com.vaultsync.android.repository
 import com.vaultsync.android.api.ApiClient
 import com.vaultsync.android.api.AuthenticationException
 import com.vaultsync.android.api.ChangePasswordRequest
+import com.vaultsync.android.api.ConflictException
 import com.vaultsync.android.api.CreateRecordRequest
 import com.vaultsync.android.api.HealthResponse
 import com.vaultsync.android.api.LoginRequest
 import com.vaultsync.android.api.RegisterRequest
 import com.vaultsync.android.api.UpdateRecordRequest
 import com.vaultsync.android.api.UpdateVaultKeyRequest
+import com.vaultsync.android.api.ValidationException
+import com.vaultsync.android.api.VaultKeyResponse
 import com.vaultsync.android.crypto.BiometricKeyManager
 import com.vaultsync.android.crypto.BiometricWrappedKeyEnvelope
 import com.vaultsync.android.crypto.KeyStoreManager
@@ -93,6 +96,9 @@ class VaultRepository(
         private set
     var kdfSalt: String? = null
         private set
+    var vaultKeyVersion: Int = 1
+        private set
+    private var _accountPassword: String? = null
 
     var lastActivityTime: Long = System.currentTimeMillis()
         private set
@@ -115,6 +121,7 @@ class VaultRepository(
                 accountId = keyStoreManager.lastAccountId
                 wrappedVaultKey = keyStoreManager.lastWrappedVaultKey
                 kdfSalt = keyStoreManager.lastKdfSalt
+                vaultKeyVersion = keyStoreManager.lastVaultKeyVersion
                 val bioEnabled = if (accountId.isNotBlank()) biometricKeyManager.isBiometricEnabled(accountId) else false
                 _sessionState.update {
                     it.copy(
@@ -307,10 +314,13 @@ class VaultRepository(
         keyStoreManager.lastAccountId = ""
         keyStoreManager.lastWrappedVaultKey = null
         keyStoreManager.lastKdfSalt = null
+        keyStoreManager.lastVaultKeyVersion = 1
         username = ""
         accountId = ""
         wrappedVaultKey = null
         kdfSalt = null
+        vaultKeyVersion = 1
+        _accountPassword = null
         _sessionState.update {
             it.copy(
                 isAuthenticated = false,
@@ -357,11 +367,14 @@ class VaultRepository(
             keyStoreManager.lastAccountId = ""
             keyStoreManager.lastWrappedVaultKey = null
             keyStoreManager.lastKdfSalt = null
+            keyStoreManager.lastVaultKeyVersion = 1
             api.sessionToken = null
             username = ""
             accountId = ""
             wrappedVaultKey = null
             kdfSalt = null
+            vaultKeyVersion = 1
+            _accountPassword = null
             lock()
             _sessionState.update {
                 it.copy(
@@ -440,6 +453,8 @@ class VaultRepository(
             accountId = res.accountId
             wrappedVaultKey = res.wrappedVaultKey
             kdfSalt = res.kdfSalt
+            vaultKeyVersion = res.vaultKeyVersion
+            _accountPassword = accountPasswordInput
         }
 
         try {
@@ -449,6 +464,7 @@ class VaultRepository(
                 keyStoreManager.lastAccountId = res.accountId
                 keyStoreManager.lastWrappedVaultKey = res.wrappedVaultKey
                 keyStoreManager.lastKdfSalt = res.kdfSalt
+                keyStoreManager.lastVaultKeyVersion = res.vaultKeyVersion
             }
         } catch (e: SecureStorageException) {
             lock()
@@ -458,10 +474,13 @@ class VaultRepository(
                 accountId = ""
                 wrappedVaultKey = null
                 kdfSalt = null
+                vaultKeyVersion = 1
+                _accountPassword = null
             }
             keyStoreManager.lastAccountId = ""
             keyStoreManager.lastWrappedVaultKey = null
             keyStoreManager.lastKdfSalt = null
+            keyStoreManager.lastVaultKeyVersion = 1
             _sessionState.update {
                 it.copy(
                     isAuthenticated = false,
@@ -1339,22 +1358,45 @@ class VaultRepository(
     suspend fun changeAccountPassword(currentPass: String, newPass: String) = withContext(ioDispatcher) {
         val req = ChangePasswordRequest(currentPassword = currentPass, newPassword = newPass)
         api.changeAccountPassword(req)
+        synchronized(keyLock) {
+            _accountPassword = newPass
+        }
     }
 
-    suspend fun rotateMasterPassword(currentMaster: CharArray, newMaster: CharArray) {
-        rotateMasterPassword(String(newMaster))
+    suspend fun fetchVaultKey(): VaultKeyResponse = withContext(ioDispatcher) {
+        val res = api.getVaultKey()
+        synchronized(keyLock) {
+            wrappedVaultKey = res.wrappedVaultKey
+            kdfSalt = res.kdfSalt
+            vaultKeyVersion = res.vaultKeyVersion
+        }
+        withContext(ioDispatcher) {
+            keyStoreManager.lastWrappedVaultKey = res.wrappedVaultKey
+            keyStoreManager.lastKdfSalt = res.kdfSalt
+            keyStoreManager.lastVaultKeyVersion = res.vaultKeyVersion
+        }
+        res
     }
 
-    suspend fun rotateMasterPassword(newMasterPassword: String) = mutex.withLock {
+    suspend fun rotateMasterPassword(currentMaster: CharArray, newMaster: CharArray, accountPassword: String? = null) {
+        rotateMasterPassword(String(newMaster), accountPassword)
+    }
+
+    suspend fun rotateMasterPassword(newMasterPassword: String, accountPassword: String? = null) = mutex.withLock {
         val gen: Long
         val sessionGen: Long
         val currentVek: ByteArray
+        val expectedVer: Int
+        val accPass: String
         synchronized(keyLock) {
             gen = lockGeneration
             sessionGen = sessionGeneration
             if (!_sessionState.value.isUnlocked || _vaultKey == null) {
                 throw IllegalStateException("Vault must be unlocked to rotate master password")
             }
+            accPass = accountPassword ?: _accountPassword
+                ?: throw IllegalStateException("Account password required for step-up auth to rotate master password")
+            expectedVer = vaultKeyVersion
             currentVek = _vaultKey!!.clone()
         }
 
@@ -1371,12 +1413,28 @@ class VaultRepository(
                 }
             }
 
-            try {
+            val updateReq = UpdateVaultKeyRequest(
+                wrappedVaultKey = newEnvelopeJson,
+                kdfSalt = newSaltBase64,
+                expectedVersion = expectedVer,
+                currentPassword = accPass
+            )
+
+            val updateRes = try {
                 withContext(ioDispatcher) {
-                    api.updateVaultKey(UpdateVaultKeyRequest(wrappedVaultKey = newEnvelopeJson, kdfSalt = newSaltBase64))
+                    api.updateVaultKey(updateReq)
                 }
             } catch (e: AuthenticationException) {
                 handleAuthFailure()
+                throw e
+            } catch (e: ConflictException) {
+                // HTTP 409: Concurrency conflict: vault key was modified concurrently on another device.
+                // Invariant: Do not silently retry with a newer version.
+                // Invariant: Do not mutate local wrappedVaultKey, kdfSalt, or vaultKeyVersion.
+                throw e
+            } catch (e: ValidationException) {
+                // HTTP 422: Request payload validation failed on server.
+                // Invariant: Do not mutate local wrappedVaultKey, kdfSalt, or vaultKeyVersion.
                 throw e
             }
 
@@ -1386,10 +1444,12 @@ class VaultRepository(
                 }
                 wrappedVaultKey = newEnvelopeJson
                 kdfSalt = newSaltBase64
+                vaultKeyVersion = updateRes.vaultKeyVersion
             }
             withContext(ioDispatcher) {
                 keyStoreManager.lastWrappedVaultKey = newEnvelopeJson
                 keyStoreManager.lastKdfSalt = newSaltBase64
+                keyStoreManager.lastVaultKeyVersion = updateRes.vaultKeyVersion
             }
         } finally {
             VaultCrypto.clearBytes(currentVek)

@@ -217,12 +217,17 @@ class ApiClient:
     async def update_vault_key(
         self,
         wrapped_vault_key: str,
-        kdf_salt: Optional[str] = None,
+        kdf_salt: str,
+        expected_version: int,
+        current_password: str,
     ) -> dict[str, Any]:
         """Update wrapped vault key envelope and salt (master password rotation)."""
-        payload = {"wrapped_vault_key": wrapped_vault_key}
-        if kdf_salt is not None:
-            payload["kdf_salt"] = kdf_salt
+        payload = {
+            "wrapped_vault_key": wrapped_vault_key,
+            "kdf_salt": kdf_salt,
+            "expected_version": expected_version,
+            "current_password": current_password,
+        }
         return await self._request("PUT", "/api/v1/auth/vault-key", json_data=payload)
 
     async def fetch_sync(
