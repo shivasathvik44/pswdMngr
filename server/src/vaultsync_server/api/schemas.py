@@ -44,6 +44,7 @@ class LoginResponse(BaseModel):
     expires_at: datetime
     kdf_salt: str
     wrapped_vault_key: str | None
+    vault_key_version: int = 1
 
 
 class SaltResponse(BaseModel):
@@ -60,11 +61,25 @@ class AccountPasswordChangeRequest(BaseModel):
 
 
 class VaultKeyUpdateRequest(BaseModel):
-    """Request to update wrapped vault key envelope and optional fresh public KDF salt."""
+    """Request to update wrapped vault key envelope and fresh public KDF salt with step-up auth and version locking."""
     model_config = ConfigDict(extra="forbid")
 
     wrapped_vault_key: str = Field(min_length=10, max_length=4096)
-    kdf_salt: str | None = Field(default=None, min_length=16, max_length=64)
+    kdf_salt: str = Field(min_length=16, max_length=64, description="Base64 encoded 16-byte KDF salt")
+    expected_version: int = Field(ge=0, description="Expected current vault key version")
+    current_password: str = Field(min_length=8, max_length=256, description="Account password for step-up authorization")
+
+
+class VaultKeyResponse(BaseModel):
+    wrapped_vault_key: str | None
+    kdf_salt: str
+    vault_key_version: int
+
+
+class VaultKeyUpdateResponse(BaseModel):
+    status: str = "ok"
+    message: str = "Wrapped vault key updated successfully"
+    vault_key_version: int
 
 
 class SessionItem(BaseModel):

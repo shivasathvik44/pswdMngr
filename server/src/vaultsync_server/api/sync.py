@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DbSession
 
@@ -30,6 +30,16 @@ async def sync_changes(
     Supports offline-first clients resuming synchronization after connectivity loss.
     """
     account, _ = auth_data
+
+    # Validate that since_cursor does not exceed the current account sync_cursor
+    if since_cursor > account.sync_cursor:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Invalid sync cursor {since_cursor}: exceeds current server cursor {account.sync_cursor}. "
+                "Client must resynchronize from cursor 0."
+            ),
+        )
 
     stmt = (
         select(EncryptedRecord)

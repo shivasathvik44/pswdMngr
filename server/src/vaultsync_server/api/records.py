@@ -179,19 +179,39 @@ async def update_record(
             detail=f"Malformed encrypted envelope: {exc}",
         ) from exc
 
-    stmt = select(EncryptedRecord).where(
-        EncryptedRecord.account_id == account.id,
-        EncryptedRecord.record_id == record_id,
-    )
-    record = db.execute(stmt).scalar_one_or_none()
+    now = datetime.now(timezone.utc)
 
-    if not record or record.is_deleted:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Record not found",
+    # Atomic conditional update enforcing expected_revision directly in SQL
+    update_stmt = (
+        update(EncryptedRecord)
+        .where(
+            EncryptedRecord.account_id == account.id,
+            EncryptedRecord.record_id == record_id,
+            EncryptedRecord.revision == req.expected_revision,
+            EncryptedRecord.is_deleted.is_(False),
         )
+        .values(
+            ciphertext_payload=req.ciphertext_payload,
+            revision=EncryptedRecord.revision + 1,
+            updated_at=now,
+        )
+    )
+    result = db.execute(update_stmt)
 
-    if record.revision != req.expected_revision:
+    if result.rowcount == 0:
+        # Check whether record exists or has revision conflict
+        record = db.execute(
+            select(EncryptedRecord).where(
+                EncryptedRecord.account_id == account.id,
+                EncryptedRecord.record_id == record_id,
+            )
+        ).scalar_one_or_none()
+
+        if not record or record.is_deleted:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Record not found",
+            )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -200,7 +220,7 @@ async def update_record(
             ),
         )
 
-    # Atomically allocate next sync cursor for this account in the same transaction
+    # Allocate next sync cursor for this account in the same transaction
     cursor_stmt = (
         update(Account)
         .where(Account.id == account.id)
@@ -208,24 +228,30 @@ async def update_record(
         .returning(Account.sync_cursor)
     )
     new_cursor = db.execute(cursor_stmt).scalar_one()
-    now = datetime.now(timezone.utc)
 
-    record.ciphertext_payload = req.ciphertext_payload
-    record.revision += 1
-    record.sync_cursor = new_cursor
-    record.updated_at = now
+    # Assign cursor to updated record
+    set_cursor_stmt = (
+        update(EncryptedRecord)
+        .where(
+            EncryptedRecord.account_id == account.id,
+            EncryptedRecord.record_id == record_id,
+        )
+        .values(sync_cursor=new_cursor)
+        .returning(EncryptedRecord)
+    )
+    updated_record = db.execute(set_cursor_stmt).scalar_one()
 
     db.commit()
-    db.refresh(record)
+    db.refresh(updated_record)
 
     return RecordResponse(
-        record_id=record.record_id,
-        ciphertext_payload=record.ciphertext_payload,
-        revision=record.revision,
-        sync_cursor=record.sync_cursor,
-        is_deleted=record.is_deleted,
-        created_at=record.created_at,
-        updated_at=record.updated_at,
+        record_id=updated_record.record_id,
+        ciphertext_payload=updated_record.ciphertext_payload,
+        revision=updated_record.revision,
+        sync_cursor=updated_record.sync_cursor,
+        is_deleted=updated_record.is_deleted,
+        created_at=updated_record.created_at,
+        updated_at=updated_record.updated_at,
     )
 
 
@@ -238,24 +264,55 @@ async def delete_record(
     record_id: str,
     auth_data: Annotated[tuple[Account, Session], Depends(get_current_session)],
     db: Annotated[DbSession, Depends(get_db)],
-    expected_revision: Annotated[int | None, Query(description="Optional revision guard")] = None,
+    expected_revision: Annotated[int | None, Query(description="Expected base revision for optimistic concurrency")] = None,
 ) -> RecordDeleteResponse:
-    """Tombstone a record to propagate deletion to synchronized clients."""
+    """Tombstone a record to propagate deletion to synchronized clients.
+
+    Requires expected_revision to prevent stale clients from deleting records
+    modified concurrently elsewhere.
+    """
     account, _ = auth_data
 
-    stmt = select(EncryptedRecord).where(
-        EncryptedRecord.account_id == account.id,
-        EncryptedRecord.record_id == record_id,
-    )
-    record = db.execute(stmt).scalar_one_or_none()
-
-    if not record or record.is_deleted:
+    if expected_revision is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Record not found",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing required query parameter: expected_revision",
         )
 
-    if expected_revision is not None and record.revision != expected_revision:
+    now = datetime.now(timezone.utc)
+
+    # Atomic conditional update for tombstone creation directly in SQL
+    tombstone_stmt = (
+        update(EncryptedRecord)
+        .where(
+            EncryptedRecord.account_id == account.id,
+            EncryptedRecord.record_id == record_id,
+            EncryptedRecord.revision == expected_revision,
+            EncryptedRecord.is_deleted.is_(False),
+        )
+        .values(
+            is_deleted=True,
+            ciphertext_payload="",
+            revision=EncryptedRecord.revision + 1,
+            updated_at=now,
+        )
+    )
+    result = db.execute(tombstone_stmt)
+
+    if result.rowcount == 0:
+        # Check whether record exists or is already deleted/modified
+        record = db.execute(
+            select(EncryptedRecord).where(
+                EncryptedRecord.account_id == account.id,
+                EncryptedRecord.record_id == record_id,
+            )
+        ).scalar_one_or_none()
+
+        if not record or record.is_deleted:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Record not found",
+            )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -264,7 +321,7 @@ async def delete_record(
             ),
         )
 
-    # Atomically allocate next sync cursor for this account in the same transaction
+    # Allocate next sync cursor for this account in the same transaction
     cursor_stmt = (
         update(Account)
         .where(Account.id == account.id)
@@ -272,20 +329,25 @@ async def delete_record(
         .returning(Account.sync_cursor)
     )
     new_cursor = db.execute(cursor_stmt).scalar_one()
-    now = datetime.now(timezone.utc)
 
-    record.is_deleted = True
-    record.revision += 1
-    record.sync_cursor = new_cursor
-    record.ciphertext_payload = ""  # Purge ciphertext content
-    record.updated_at = now
+    # Assign cursor to tombstoned record
+    set_cursor_stmt = (
+        update(EncryptedRecord)
+        .where(
+            EncryptedRecord.account_id == account.id,
+            EncryptedRecord.record_id == record_id,
+        )
+        .values(sync_cursor=new_cursor)
+        .returning(EncryptedRecord)
+    )
+    tombstoned_record = db.execute(set_cursor_stmt).scalar_one()
 
     db.commit()
-    db.refresh(record)
+    db.refresh(tombstoned_record)
 
     return RecordDeleteResponse(
-        record_id=record.record_id,
-        revision=record.revision,
-        sync_cursor=record.sync_cursor,
+        record_id=tombstoned_record.record_id,
+        revision=tombstoned_record.revision,
+        sync_cursor=tombstoned_record.sync_cursor,
         is_deleted=True,
     )

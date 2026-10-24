@@ -42,6 +42,7 @@ class Account(Base):
     kdf_salt: Mapped[str] = mapped_column(String(64), nullable=False)
     wrapped_vault_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     sync_cursor: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    vault_key_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     requires_password_migration: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     

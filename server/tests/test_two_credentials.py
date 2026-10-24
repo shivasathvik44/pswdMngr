@@ -399,6 +399,8 @@ async def test_vault_master_password_change_lifecycle(
         json={
             "wrapped_vault_key": wrap2.to_json(),
             "kdf_salt": salt2_b64,
+            "expected_version": 1,
+            "current_password": account_password,
         },
     )
     assert update_res.status_code == 200
@@ -597,20 +599,44 @@ async def test_vault_key_update_rejects_unauthorized_and_malformed(async_client:
     # 1. Unauthenticated request -> 401
     unauth_res = await async_client.put(
         "/api/v1/auth/vault-key",
-        json={"wrapped_vault_key": "some-envelope"},
+        json={
+            "wrapped_vault_key": "some-envelope",
+            "kdf_salt": salt_b64,
+            "expected_version": 1,
+            "current_password": account_password,
+        },
     )
     assert unauth_res.status_code == 401
 
-    # 2. Malformed JSON envelope -> 400
+    # 2. Step-up authentication failure (incorrect account password) -> 401
+    res_bad_pw = await async_client.put(
+        "/api/v1/auth/vault-key",
+        headers=auth_headers,
+        json={
+            "wrapped_vault_key": "some-envelope",
+            "kdf_salt": salt_b64,
+            "expected_version": 1,
+            "current_password": "WrongAccountPassword999!",
+        },
+    )
+    assert res_bad_pw.status_code == 401
+    assert "Current account password incorrect" in res_bad_pw.json()["detail"]
+
+    # 3. Malformed JSON envelope -> 400
     res_bad_json = await async_client.put(
         "/api/v1/auth/vault-key",
         headers=auth_headers,
-        json={"wrapped_vault_key": "{not-valid-json"},
+        json={
+            "wrapped_vault_key": "{not-valid-json",
+            "kdf_salt": salt_b64,
+            "expected_version": 1,
+            "current_password": account_password,
+        },
     )
     assert res_bad_json.status_code == 400
     assert "Invalid wrapped vault key envelope" in res_bad_json.json()["detail"]
 
-    # 3. Invalid envelope version -> 400
+    # 4. Invalid envelope version -> 400
     bad_version_env = json.dumps({
         "version": 999,
         "algorithm": "AES-256-GCM",
@@ -621,11 +647,16 @@ async def test_vault_key_update_rejects_unauthorized_and_malformed(async_client:
     res_bad_ver = await async_client.put(
         "/api/v1/auth/vault-key",
         headers=auth_headers,
-        json={"wrapped_vault_key": bad_version_env},
+        json={
+            "wrapped_vault_key": bad_version_env,
+            "kdf_salt": salt_b64,
+            "expected_version": 1,
+            "current_password": account_password,
+        },
     )
     assert res_bad_ver.status_code == 400
 
-    # 4. Invalid KDF salt encoding -> 400
+    # 5. Invalid KDF salt encoding -> 400
     valid_env = json.dumps({
         "version": 1,
         "algorithm": "AES-256-GCM",
@@ -636,9 +667,42 @@ async def test_vault_key_update_rejects_unauthorized_and_malformed(async_client:
     res_bad_salt = await async_client.put(
         "/api/v1/auth/vault-key",
         headers=auth_headers,
-        json={"wrapped_vault_key": valid_env, "kdf_salt": "invalid-base64!?"},
+        json={
+            "wrapped_vault_key": valid_env,
+            "kdf_salt": "invalid-base64!?",
+            "expected_version": 1,
+            "current_password": account_password,
+        },
     )
     assert res_bad_salt.status_code == 400
+
+    # 6. Inconsistent KDF salt (envelope salt does not match payload salt) -> 400
+    different_salt = b64encode(b"9876543210fedcba")
+    res_inconsistent_salt = await async_client.put(
+        "/api/v1/auth/vault-key",
+        headers=auth_headers,
+        json={
+            "wrapped_vault_key": valid_env,
+            "kdf_salt": different_salt,
+            "expected_version": 1,
+            "current_password": account_password,
+        },
+    )
+    assert res_inconsistent_salt.status_code == 400
+    assert "KDF salt in envelope does not match request kdf_salt" in res_inconsistent_salt.json()["detail"]
+
+    # 7. Stale expected version -> 409
+    res_stale_ver = await async_client.put(
+        "/api/v1/auth/vault-key",
+        headers=auth_headers,
+        json={
+            "wrapped_vault_key": valid_env,
+            "kdf_salt": salt_b64,
+            "expected_version": 999,
+            "current_password": account_password,
+        },
+    )
+    assert res_stale_ver.status_code == 409
 
 
 # ============================================================================
@@ -981,7 +1045,12 @@ async def test_vault_key_update_cross_account_isolation_and_preservation(async_c
     put_a = await async_client.put(
         "/api/v1/auth/vault-key",
         headers={"Authorization": f"Bearer {alice_token}"},
-        json={"wrapped_vault_key": env_a_new, "kdf_salt": salt_a_new},
+        json={
+            "wrapped_vault_key": env_a_new,
+            "kdf_salt": salt_a_new,
+            "expected_version": 1,
+            "current_password": "AlicePassword123!",
+        },
     )
     assert put_a.status_code == 200
 
@@ -991,14 +1060,16 @@ async def test_vault_key_update_cross_account_isolation_and_preservation(async_c
         acc_b = db.execute(select(Account).where(Account.username == bob_username)).scalar_one()
         assert acc_a.wrapped_vault_key == env_a_new
         assert acc_a.kdf_salt == salt_a_new
+        assert acc_a.vault_key_version == 2
         assert acc_b.wrapped_vault_key == env_b_orig
         assert acc_b.kdf_salt == salt_b
+        assert acc_b.vault_key_version == 1
 
     # 3. Malformed envelope submission preserves previously stored key
     bad_env_payloads = [
-        {"wrapped_vault_key": "not-a-json-object"},
-        {"wrapped_vault_key": json.dumps({"version": 999, "algorithm": "AES-256-GCM"})},
-        {"wrapped_vault_key": env_a_new, "kdf_salt": "invalid-b64-salt!!!"},
+        {"wrapped_vault_key": "not-a-json-object", "kdf_salt": salt_a_new, "expected_version": 2, "current_password": "AlicePassword123!"},
+        {"wrapped_vault_key": json.dumps({"version": 999, "algorithm": "AES-256-GCM"}), "kdf_salt": salt_a_new, "expected_version": 2, "current_password": "AlicePassword123!"},
+        {"wrapped_vault_key": env_a_new, "kdf_salt": "invalid-b64-salt!!!", "expected_version": 2, "current_password": "AlicePassword123!"},
     ]
 
     for bad_req in bad_env_payloads:

@@ -274,7 +274,7 @@ async def test_cross_account_isolation(async_client: AsyncClient, synthetic_clie
 
     # Bob attempts to delete Alice's record -> 404
     bob_del = await async_client.delete(
-        f"/api/v1/records/{rec_id}",
+        f"/api/v1/records/{rec_id}?expected_revision=1",
         headers={"Authorization": f"Bearer {bob_token}"},
     )
     assert bob_del.status_code == 404
@@ -408,7 +408,7 @@ async def test_incremental_sync_and_pagination(
     assert initial_cursor == 3
 
     # Delete record 2
-    await async_client.delete("/api/v1/records/rec-seq-2", headers=auth_headers)
+    await async_client.delete("/api/v1/records/rec-seq-2?expected_revision=1", headers=auth_headers)
 
     # Incremental sync since initial_cursor
     inc_res = await async_client.get(

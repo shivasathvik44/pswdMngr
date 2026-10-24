@@ -5,6 +5,9 @@ import pytest
 from httpx import AsyncClient
 
 
+from vaultsync_server.config import settings
+
+
 @pytest.mark.anyio
 async def test_health_root_endpoint(async_client: AsyncClient):
     """Test GET /health returns 200 OK and valid health metadata."""
@@ -13,7 +16,7 @@ async def test_health_root_endpoint(async_client: AsyncClient):
 
     data = response.json()
     assert data["status"] == "ok"
-    assert data["version"] == "0.1.0"
+    assert data["version"] == settings.app_version
     assert "timestamp" in data
     assert "environment" in data
 
@@ -26,7 +29,7 @@ async def test_health_api_v1_endpoint(async_client: AsyncClient):
 
     data = response.json()
     assert data["status"] == "ok"
-    assert data["version"] == "0.1.0"
+    assert data["version"] == settings.app_version
     
     # Verify ISO timestamp parsing
     parsed_time = datetime.fromisoformat(data["timestamp"])

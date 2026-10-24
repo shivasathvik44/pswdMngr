@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Final
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session as DbSession
 
 from vaultsync_server.api.dependencies import get_current_session
@@ -17,7 +17,9 @@ from vaultsync_server.api.schemas import (
     RegisterRequest,
     RegisterResponse,
     SaltResponse,
+    VaultKeyResponse,
     VaultKeyUpdateRequest,
+    VaultKeyUpdateResponse,
 )
 from vaultsync_server.config import settings
 from vaultsync_server.crypto.envelope import WrappedKeyEnvelope, b64decode, b64encode
@@ -110,11 +112,13 @@ async def register(
         )
 
     account_password_hash = hash_password(req.account_password)
+    vault_key_version = 1 if req.wrapped_vault_key is not None else 0
     account = Account(
         username=req.username,
         account_password_hash=account_password_hash,
         kdf_salt=req.kdf_salt,
         wrapped_vault_key=req.wrapped_vault_key,
+        vault_key_version=vault_key_version,
     )
     db.add(account)
     db.commit()
@@ -216,6 +220,7 @@ async def login(
         expires_at=expires_at,
         kdf_salt=account.kdf_salt,
         wrapped_vault_key=account.wrapped_vault_key,
+        vault_key_version=account.vault_key_version,
     )
 
 
@@ -344,59 +349,145 @@ async def get_user_salt(
 
 @router.put(
     "/vault-key",
+    response_model=VaultKeyUpdateResponse,
     status_code=status.HTTP_200_OK,
     summary="Upload or update encrypted wrapped vault key envelope",
 )
 async def update_vault_key(
     req: VaultKeyUpdateRequest,
     auth_data: Annotated[tuple[Account, Session], Depends(get_current_session)],
+    request: Request,
     db: Annotated[DbSession, Depends(get_db)],
-) -> dict[str, str]:
-    """Store or update the user's WrappedKeyEnvelope (e.g. after master password change).
+) -> VaultKeyUpdateResponse:
+    """Store or update the user's WrappedKeyEnvelope with step-up auth and version locking.
     
-    Validates envelope format and optional public KDF salt.
-    Encrypted records and account password hash remain untouched.
+    Requires step-up authentication using the account password, validates that the
+    envelope matches the provided KDF salt, and performs an atomic conditional update
+    against expected_version to reject concurrent or stale replacements.
     """
     account, _ = auth_data
+    client_ip = get_client_ip(request)
+    vkey_user_key = f"auth:vkey:{account.id}"
+    vkey_ip_key = f"auth:vkey_ip:{client_ip}"
 
-    # Validate wrapped vault key envelope format
+    # 1. Rate limiting on step-up authorization
+    if (
+        db_rate_limiter.is_rate_limited(db, vkey_user_key)
+        or db_rate_limiter.is_rate_limited(db, vkey_ip_key)
+        or rate_limiter.is_rate_limited(vkey_user_key)
+        or rate_limiter.is_rate_limited(vkey_ip_key)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed vault key update attempts. Please wait before trying again.",
+        )
+
+    # 2. Step-up authorization: verify account password
+    if not verify_password(account.account_password_hash, req.current_password):
+        db_rate_limiter.record_failure(db, vkey_user_key)
+        db_rate_limiter.record_failure(db, vkey_ip_key)
+        rate_limiter.record_failure(vkey_user_key)
+        rate_limiter.record_failure(vkey_ip_key)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Current account password incorrect",
+        )
+
+    db_rate_limiter.reset(db, vkey_user_key)
+    db_rate_limiter.reset(db, vkey_ip_key)
+    rate_limiter.reset(vkey_user_key)
+    rate_limiter.reset(vkey_ip_key)
+
+    # 3. Validate wrapped vault key envelope format
     try:
-        WrappedKeyEnvelope.from_json(req.wrapped_vault_key)
+        envelope = WrappedKeyEnvelope.from_json(req.wrapped_vault_key)
     except (CryptoError, Exception) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid wrapped vault key envelope: {exc}",
         )
 
-    # Optional KDF salt update (when changing master password)
-    if req.kdf_salt is not None:
-        try:
-            b64decode(req.kdf_salt, expected_length=16)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid kdf_salt: {exc}",
-            )
-        account.kdf_salt = req.kdf_salt
+    # 4. Validate KDF salt encoding and consistency with envelope
+    try:
+        b64decode(req.kdf_salt, expected_length=16)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid kdf_salt: {exc}",
+        )
 
-    account.wrapped_vault_key = req.wrapped_vault_key
-    account.updated_at = datetime.now(timezone.utc)
+    if envelope.kdf.salt != req.kdf_salt:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="KDF salt in envelope does not match request kdf_salt",
+        )
+
+    # 5. Atomic conditional update enforcing expected_version
+    now = datetime.now(timezone.utc)
+    update_stmt = (
+        update(Account)
+        .where(
+            Account.id == account.id,
+            Account.vault_key_version == req.expected_version,
+        )
+        .values(
+            wrapped_vault_key=req.wrapped_vault_key,
+            kdf_salt=req.kdf_salt,
+            vault_key_version=Account.vault_key_version + 1,
+            updated_at=now,
+        )
+        .returning(Account.vault_key_version)
+    )
+    result = db.execute(update_stmt).scalar_one_or_none()
+
+    if result is None:
+        # Check if this is an idempotent retry of an already completed update
+        current_acc = db.execute(
+            select(Account).where(Account.id == account.id)
+        ).scalar_one()
+
+        if (
+            current_acc.vault_key_version == req.expected_version + 1
+            and current_acc.wrapped_vault_key == req.wrapped_vault_key
+            and current_acc.kdf_salt == req.kdf_salt
+        ):
+            # Safe idempotent retry after an interrupted response
+            return VaultKeyUpdateResponse(
+                status="ok",
+                message="Wrapped vault key updated successfully",
+                vault_key_version=current_acc.vault_key_version,
+            )
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Conflict: expected vault key version {req.expected_version}, "
+                f"but current version is {current_acc.vault_key_version}"
+            ),
+        )
+
     db.commit()
-    return {"status": "ok", "message": "Wrapped vault key updated successfully"}
+    return VaultKeyUpdateResponse(
+        status="ok",
+        message="Wrapped vault key updated successfully",
+        vault_key_version=result,
+    )
 
 
 @router.get(
     "/vault-key",
+    response_model=VaultKeyResponse,
     status_code=status.HTTP_200_OK,
     summary="Retrieve current wrapped vault key envelope and salt",
 )
 async def get_vault_key(
     auth_data: Annotated[tuple[Account, Session], Depends(get_current_session)],
-) -> dict[str, str | None]:
-    """Retrieve the current wrapped vault key envelope and KDF salt for the calling session."""
+) -> VaultKeyResponse:
+    """Retrieve the current wrapped vault key envelope, KDF salt, and version for the calling session."""
     account, _ = auth_data
-    return {
-        "wrapped_vault_key": account.wrapped_vault_key,
-        "kdf_salt": account.kdf_salt,
-    }
+    return VaultKeyResponse(
+        wrapped_vault_key=account.wrapped_vault_key,
+        kdf_salt=account.kdf_salt,
+        vault_key_version=account.vault_key_version,
+    )
 

@@ -245,7 +245,7 @@ async def test_sync_pagination_during_concurrent_mutations(async_client: AsyncCl
         json={"expected_revision": 1, "ciphertext_payload": make_payload("rec-2", "Updated Data 2")},
     )
     # Delete rec-4 (tombstones it, moves its sync_cursor from 4 to 8)
-    await async_client.delete("/api/v1/records/rec-4", headers=headers)
+    await async_client.delete("/api/v1/records/rec-4?expected_revision=1", headers=headers)
     # Insert new rec-7 (sync_cursor 9)
     await async_client.post(
         "/api/v1/records",
