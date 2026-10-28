@@ -1,0 +1,96 @@
+# Dependabot configuration for VaultSync
+# Configures automated dependency update PRs for Python backend, Python desktop,
+# Android Gradle dependencies, and GitHub Actions workflows.
+
+version: 2
+updates:
+  # Python backend dependencies (server/pyproject.toml)
+  - package-ecosystem: "pip"
+    directory: "/server"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+      - "server"
+    groups:
+      patch-and-minor:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+          - "minor"
+    commit-message:
+      prefix: "deps(server)"
+
+  # Python desktop application dependencies (desktop/pyproject.toml)
+  - package-ecosystem: "pip"
+    directory: "/desktop"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+      - "desktop"
+    groups:
+      patch-and-minor:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+          - "minor"
+    commit-message:
+      prefix: "deps(desktop)"
+
+  # Android Gradle dependencies (android/build.gradle.kts, android/app/build.gradle.kts)
+  - package-ecosystem: "gradle"
+    directory: "/android"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "android"
+      - "gradle"
+    groups:
+      patch-and-minor:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+          - "minor"
+    commit-message:
+      prefix: "deps(android)"
+
+  # GitHub Actions workflows (.github/workflows)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    groups:
+      patch-and-minor:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+          - "minor"
+    commit-message:
+      prefix: "deps(actions)"

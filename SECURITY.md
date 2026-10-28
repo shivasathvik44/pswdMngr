@@ -10,7 +10,7 @@ VaultSync is designed under a **Zero-Knowledge, Two-Credential, Defense-in-Depth
 4. **Private Transport by Design**: The backend server is designed to bind to local loopback (`127.0.0.1`) behind an authenticating TLS reverse proxy or an encrypted mesh overlay (such as Tailscale or WireGuard), precluding exposure of the raw application server to the public internet.
 5. **No Custom Cryptography**: All cryptographic implementations strictly rely on standardized, vetted industry libraries (`cryptography`, `argon2-cffi`, `BouncyCastle`).
 
-For comprehensive security architecture and deployment instructions, see [`docs/SECURITY_AND_DEPLOYMENT.md`](docs/SECURITY_AND_DEPLOYMENT.md) and [`docs/threat-model.md`](docs/threat-model.md).
+For comprehensive security architecture, dependency management, and deployment instructions, see [`docs/SECURITY_AND_DEPLOYMENT.md`](docs/SECURITY_AND_DEPLOYMENT.md), [`docs/security/dependency-management.md`](docs/security/dependency-management.md), and [`docs/threat-model.md`](docs/threat-model.md).
 
 ## Supported Versions
 
@@ -36,3 +36,17 @@ We take the security of VaultSync seriously. If you discover a vulnerability or 
 - **Fail Closed**: Any cryptographic tampering, nonce reuse, or corrupted authentication tag must terminate decryption immediately.
 - **Structured Logging**: Application logs must never contain user vault payloads, secrets, tokens, or plaintext metadata.
 - **Production Secret Validation**: In production environments, `VAULTSYNC_SERVER_SECRET_KEY` must be at least 32 characters of high-entropy randomness, and insecure default keys or databases are rejected at startup.
+- **Dependency Vulnerability Scanning**: Direct and transitive dependencies across backend, desktop, Android, and CI workflows are continuously audited. Scanner execution errors and expired vulnerability exceptions fail closed in CI.
+
+## Dependency Monitoring & Vulnerability Remediation
+
+VaultSync enforces explicit remediation targets upon confirmation of a vulnerability:
+
+| Severity | Target SLA |
+|---|---|
+| **Critical** | Triage within 24 hours; mitigate or remediate within 72 hours |
+| **High** | Triage within 3 business days; remediate within 7 calendar days |
+| **Medium** | Triage within 14 calendar days; remediate within 30 calendar days |
+| **Low** | Review within 30 calendar days; remediate within 90 calendar days |
+
+Temporary risk acceptance is governed by the [Dependency Management & Exception Policy](docs/security/dependency-management.md). Exceptions require documented compensating controls, a named owner, a maximum 90-day time bound, and registration in [`docs/security/vulnerability-exceptions.json`](docs/security/vulnerability-exceptions.json). Expired exceptions automatically fail CI.

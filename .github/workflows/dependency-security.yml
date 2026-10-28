@@ -1,0 +1,113 @@
+name: Dependency Security & Vulnerability Scanning
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "server/**"
+      - "desktop/**"
+      - "android/**"
+      - ".github/**"
+      - "scripts/**"
+      - "docs/security/**"
+  schedule:
+    - cron: "0 4 * * 1" # Weekly every Monday at 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit-server-dependencies:
+    name: Audit Python Backend Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install backend dependencies and scanner
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "server[dev]"
+          pip install pip-audit
+
+      - name: Run pip-audit and policy enforcement
+        run: |
+          mkdir -p reports
+          pip-audit --format json --desc > reports/raw-server-audit.json || true
+          python scripts/vulnerability_scanner.py \
+            --manifest server/pyproject.toml \
+            --exceptions docs/security/vulnerability-exceptions.json \
+            --fixture reports/raw-server-audit.json \
+            --output-json reports/server-audit-report.json
+
+      - name: Upload audit report artifact
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: server-dependency-audit-report
+          path: reports/server-audit-report.json
+          retention-days: 14
+
+  audit-desktop-dependencies:
+    name: Audit Python Desktop Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install desktop dependencies and scanner
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "desktop[dev]"
+          pip install pip-audit
+
+      - name: Run pip-audit and policy enforcement
+        run: |
+          mkdir -p reports
+          pip-audit --format json --desc > reports/raw-desktop-audit.json || true
+          python scripts/vulnerability_scanner.py \
+            --manifest desktop/pyproject.toml \
+            --exceptions docs/security/vulnerability-exceptions.json \
+            --fixture reports/raw-desktop-audit.json \
+            --output-json reports/desktop-audit-report.json
+
+      - name: Upload audit report artifact
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: desktop-dependency-audit-report
+          path: reports/desktop-audit-report.json
+          retention-days: 14
+
+  audit-android-dependencies:
+    name: Audit Android Gradle Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b # v4.5.0
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Validate Gradle dependency graph resolution
+        run: |
+          chmod +x android/gradlew
+          ./android/gradlew -p android app:dependencies --configuration releaseRuntimeClasspath
