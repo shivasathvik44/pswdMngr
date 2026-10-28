@@ -78,7 +78,7 @@ dependencies {
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
 
     // Secure Storage (Android Keystore / EncryptedSharedPreferences)
-    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("androidx.security:security-crypto:1.1.0")
 
     // Biometric Authentication (Android Keystore / BiometricPrompt)
     implementation("androidx.biometric:biometric:1.1.0")
