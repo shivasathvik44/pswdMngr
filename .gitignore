@@ -44,10 +44,41 @@ htmlcov/
 *.key
 *.pem
 *.pfx
+*.p12
+*.pkcs12
+*.crt
+*.cer
+*.der
+*.bks
+*.pk8
+*.pubkey
+
+*.privkey
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+credentials*.json
+client_secret*.json
+google-services.json
+*.token
+*.tokens
+auth.json
+auth-tokens.json
 secrets/
+*.secret
+*.secrets
+*.keychain
 .env
 .env.*
+*.env
 !.env.example
+
+# Backup and temporary files
+*.bak
+*.backup
+*.orig
+*.tmp
 
 # Desktop & IDE
 .vscode/
@@ -61,8 +92,11 @@ secrets/
 android/.gradle/
 android/build/
 android/*/build/
-android/local.properties
+local.properties*
+*.local.properties*
+android/local.properties*
 *.apk
 *.aab
 *.keystore
 *.jks
+

@@ -37,6 +37,8 @@ We take the security of VaultSync seriously. If you discover a vulnerability or 
 - **Structured Logging**: Application logs must never contain user vault payloads, secrets, tokens, or plaintext metadata.
 - **Production Secret Validation**: In production environments, `VAULTSYNC_SERVER_SECRET_KEY` must be at least 32 characters of high-entropy randomness, and insecure default keys or databases are rejected at startup.
 - **Dependency Vulnerability Scanning**: Direct and transitive dependencies across backend, desktop, Android, and CI workflows are continuously audited. Scanner execution errors and expired vulnerability exceptions fail closed in CI.
+- **Static Application Security Testing (SAST)**: Python code is continuously analyzed via GitHub CodeQL (`security-extended` and `security-and-quality` suites) on pushes and pull requests.
+- **Secret Protection**: Secret scanning and push protection block committed credentials, tokens, or private keys before repository ingestion.
 
 ## Dependency Monitoring & Vulnerability Remediation
 

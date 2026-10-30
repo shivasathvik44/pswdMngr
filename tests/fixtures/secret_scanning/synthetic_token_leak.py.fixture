@@ -1,0 +1,4 @@
+# SYNTHETIC TEST FIXTURE - NOT A REAL CREDENTIAL
+# Used exclusively to verify that secret-scanning tooling flags token leaks.
+
+SYNTHETIC_LEAKED_TOKEN = "ghp_0123456789abcdef0123456789abcdef0123"

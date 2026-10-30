@@ -1,0 +1,5 @@
+# SYNTHETIC TEST FIXTURE - NOT A REAL CREDENTIAL
+# Used to verify that allowlists prevent false positives for documented placeholders.
+
+SERVER_SECRET_KEY = "CHANGE_ME_GENERATE_WITH_OPENSSL_RAND_HEX_32"
+DEV_KEY = "vaultsync-development-secret-key-change-in-production-min32bytes"

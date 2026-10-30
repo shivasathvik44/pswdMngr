@@ -1,0 +1,15 @@
+# ==============================================================================
+# VaultSync Pre-Commit Configuration
+# ==============================================================================
+# Configures local pre-commit hooks to prevent secret leaks prior to commit.
+# Run `pre-commit install` once locally to activate.
+# ==============================================================================
+repos:
+  - repo: local
+    hooks:
+      - id: vaultsync-secret-scan
+        name: VaultSync Secret Scanner & Credential Leak Prevention
+        entry: python scripts/secret_scanner.py --scan-dir . --config .gitleaks.toml
+        language: system
+        pass_filenames: false
+        always_run: true

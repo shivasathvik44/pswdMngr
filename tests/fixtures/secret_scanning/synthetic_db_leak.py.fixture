@@ -1,0 +1,4 @@
+# SYNTHETIC TEST FIXTURE - NOT A REAL CREDENTIAL
+# Used to verify that secret-scanning tooling catches hardcoded database passwords.
+
+DATABASE_URI = "postgresql://dbuser:sUp3rS3cr3tP@ssw0rd!@10.0.0.1:5432/proddb"

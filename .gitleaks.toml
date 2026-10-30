@@ -1,0 +1,112 @@
+# ==============================================================================
+# VaultSync Secret Scanning Configuration (Gitleaks)
+# ==============================================================================
+# This configuration defines secret detection rules, entropy thresholds, and
+# narrowly scoped allowlists for VaultSync. It is evaluated both in automated
+# CI (GitHub Actions) and by the local secret-scanning test suite.
+# ==============================================================================
+
+title = "VaultSync Gitleaks Configuration"
+
+[allowlist]
+description = "Narrowly scoped allowlist for specific synthetic fixture files and explicit placeholders"
+paths = [
+    '''(^|/)tests/fixtures/secret_scanning/.*\.fixture$''',
+    '''(^|/)\.env\.example$''',
+]
+regexes = [
+    '''\bCHANGE_ME[A-Z0-9_]*\b''',
+    '''vaultsync-development-secret-key-change-in-production-min32bytes''',
+    '''strong-production-server-secret-key-entropy-32chars!''',
+    '''TestMasterPassword123!''',
+    '''mock-session-token-[a-zA-Z0-9_\-]+''',
+    '''test-token-[a-zA-Z0-9_\-]+''',
+]
+
+
+# ------------------------------------------------------------------------------
+# Asymmetric Cryptography & Private Keys
+# ------------------------------------------------------------------------------
+[[rules]]
+id = "vaultsync-private-key"
+description = "Detected Asymmetric Private Key (RSA/EC/DSA/OpenSSH/PGP)"
+regex = '''-----BEGIN (?:[A-Z0-9 ]+)?PRIVATE KEY-----'''
+keywords = ["PRIVATE KEY"]
+
+# ------------------------------------------------------------------------------
+# GitHub Authentication Secrets
+# ------------------------------------------------------------------------------
+[[rules]]
+id = "vaultsync-github-pat"
+description = "Detected GitHub Personal Access Token (classic)"
+regex = '''\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}\b'''
+keywords = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"]
+
+[[rules]]
+id = "vaultsync-github-fine-grained-pat"
+description = "Detected GitHub Fine-Grained Personal Access Token"
+regex = '''\bgithub_pat_[A-Za-z0-9_]{82}\b'''
+keywords = ["github_pat_"]
+
+# ------------------------------------------------------------------------------
+# Cloud Provider & Infrastructure Credentials
+# ------------------------------------------------------------------------------
+[[rules]]
+id = "vaultsync-aws-access-key-id"
+description = "Detected AWS Access Key ID"
+regex = '''\b(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}\b'''
+keywords = ["AKIA", "ASIA", "AGPA", "AIDA", "AROA", "AIPA", "ANPA", "ANVA"]
+
+[[rules]]
+id = "vaultsync-aws-secret-access-key"
+description = "Detected AWS Secret Access Key assignment"
+regex = '''(?i)aws_secret_access_key\s*[:=]\s*['"]?([A-Za-z0-9/+=]{40})['"]?'''
+keywords = ["aws_secret_access_key"]
+
+[[rules]]
+id = "vaultsync-google-api-key"
+description = "Detected Google API / GCP Key"
+regex = '''\bAIza[0-9A-Za-z\\-_]{35}\b'''
+keywords = ["AIza"]
+
+# ------------------------------------------------------------------------------
+# Third-Party Service Tokens
+# ------------------------------------------------------------------------------
+[[rules]]
+id = "vaultsync-slack-token"
+description = "Detected Slack Bot or User Token"
+regex = '''\bxox[baprs]-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24,32}\b'''
+keywords = ["xoxb", "xoxp", "xoxa", "xoxr", "xoxs"]
+
+[[rules]]
+id = "vaultsync-stripe-api-key"
+description = "Detected Stripe API Key (live or test)"
+regex = '''\b(?:sk|rk)_(?:test|live)_[0-9a-zA-Z]{24,}\b'''
+keywords = ["sk_test_", "sk_live_", "rk_test_", "rk_live_"]
+
+# ------------------------------------------------------------------------------
+# Database & Application Secrets
+# ------------------------------------------------------------------------------
+[[rules]]
+id = "vaultsync-database-uri-password"
+description = "Detected Database Connection URL containing embedded password"
+regex = '''(?i)(?:postgres|mysql|sqlite|mongodb|redis)(?:ql)?(?:\+[a-z0-9_]+)?:\/\/[a-zA-Z0-9_\-\.]+:(?!(?:password|\$|\{|CHANGE_ME))[^\s@'"]+@'''
+keywords = ["postgresql://", "postgres://", "mysql://", "mongodb://", "redis://"]
+
+[[rules]]
+id = "vaultsync-android-keystore-password"
+description = "Detected Android Keystore password in cleartext"
+regex = '''(?i)(?:storePassword|keyPassword)\s*[:=]?\s*['"](?!(?:CHANGE_ME|\$|System\.getenv))[^'"]{4,}['"]'''
+keywords = ["storePassword", "keyPassword"]
+
+[[rules]]
+id = "vaultsync-generic-secret-token"
+description = "Detected Generic Secret, Access Token, or API Key assignment"
+regex = '''(?i)(?:secret[_-]?key|api[_-]?key|access[_-]?token|auth[_-]?token)\s*[:=]\s*['"]([a-zA-Z0-9_\-\.]{24,})['"]'''
+keywords = ["secret_key", "api_key", "access_token", "auth_token"]
+[rules.allowlist]
+regexes = [
+    '''\bCHANGE_ME[A-Z0-9_]*\b''',
+    '''vaultsync-development-secret-key-change-in-production-min32bytes''',
+    '''strong-production-server-secret-key-entropy-32chars!''',
+]

@@ -2,6 +2,7 @@
 
 ## 1. Overview & Security Philosophy
 
+
 As a security-sensitive password manager operating under a **Zero-Knowledge, Two-Credential, Defense-in-Depth** model, VaultSync maintains rigorous control over all external software dependencies across its ecosystem:
 
 - **Backend Server** (FastAPI / SQLAlchemy / Argon2id / Cryptography)
@@ -99,14 +100,17 @@ Dependency management strictly prioritizes correctness, reproducibility, reviewa
 ### 2.4 GitHub Actions Workflows
 
 - **Manifests**:
-  - `.github/workflows/tests.yml` (Automated backend unit/integration tests)
+  - `.github/workflows/tests.yml` (Automated backend server and desktop client tests)
   - `.github/workflows/dependency-security.yml` (Continuous dependency auditing and policy enforcement)
+  - `.github/workflows/codeql.yml` (CodeQL static application security testing for Python)
 - **Action Pinning Policy**:
   Third-party GitHub Actions must be pinned to verified immutable 40-character commit SHAs with human-readable release tags preserved as trailing comments.
   - `actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2`
   - `actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0`
   - `actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c53b # v4.5.0`
   - `actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3`
+  - `github/codeql-action/init@b56ba49b26e50535fa1e7f7db0f4f7b4bf65d80d # v3.28.10`
+  - `github/codeql-action/analyze@b56ba49b26e50535fa1e7f7db0f4f7b4bf65d80d # v3.28.10`
 
 ---
 
@@ -249,3 +253,36 @@ The following security features require one-time configuration by a repository a
 4. **Secret Scanning & Push Protection**:
    - Location: **Settings > Code security and analysis > Secret scanning**
    - Status: Enable. Blocks accidental commits of API tokens, private keys, or passwords.
+
+---
+
+## 9. Branch Protection Ruleset & Required Status Checks
+
+To protect the integrity of the `main` branch, repository administrators should configure branch rulesets (**Settings > Rules > Rulesets > New branch ruleset**):
+
+### 9.1 Ruleset Policies
+- **Target Branch**: `default` (or pattern `main`)
+- **Enforcement Status**: Active
+- **Restrict Deletions**: Enabled (prevents accidental or malicious branch deletion)
+- **Block Force Pushes**: Enabled (disallows history rewriting)
+- **Require a Pull Request before Merging**: Enabled
+  - Minimum approvals: At least 1 review
+  - Dismiss stale pull request approvals when new commits are pushed
+  - Require conversation resolution before merging
+- **Do Not Allow Bypassing Above Settings**: Enabled (enforces parity across all contributors, including administrators)
+
+### 9.2 Verified Required Status Checks
+Based on configured GitHub Actions workflows, the exact status check names to require are:
+
+| Status Check Name | Workflow Origin | Job Description |
+|---|---|---|
+| `Backend Server Tests (3.12)` | `.github/workflows/tests.yml` | Validates backend server tests on Python 3.12 |
+| `Backend Server Tests (3.13)` | `.github/workflows/tests.yml` | Validates backend server tests on Python 3.13 |
+| `Desktop Client Tests` | `.github/workflows/tests.yml` | Validates desktop client tests in headless mode |
+| `Audit Python Backend Dependencies` | `.github/workflows/dependency-security.yml` | Audits server dependencies and enforces exception policy |
+| `Audit Python Desktop Dependencies` | `.github/workflows/dependency-security.yml` | Audits desktop dependencies and enforces exception policy |
+| `Analyze Python Code` | `.github/workflows/codeql.yml` | CodeQL static security analysis for Python code |
+
+> [!NOTE]
+> `Audit Android Gradle Dependencies` runs in `.github/workflows/dependency-security.yml` to resolve the Android dependency classpath under JDK 17. Because local host environments without Android SDK / JDK 17 cannot reproduce it locally, it is recommended to observe initial passing runs on GitHub Actions before adding it to mandatory blocking rules.
+
