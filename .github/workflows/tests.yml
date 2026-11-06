@@ -79,6 +79,10 @@ jobs:
           distribution: "temurin"
           java-version: "17"
 
+      - name: Accept Android SDK licenses
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+
       - name: Run Android unit tests
         run: |
           chmod +x android/gradlew
