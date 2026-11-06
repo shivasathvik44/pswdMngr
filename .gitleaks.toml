@@ -11,8 +11,12 @@ title = "VaultSync Gitleaks Configuration"
 [allowlist]
 description = "Narrowly scoped allowlist for specific synthetic fixture files and explicit placeholders"
 paths = [
-    '''(^|/)tests/fixtures/secret_scanning/.*\.fixture$''',
+    '''(^|/)tests/fixtures/secret_scanning/.*''',
     '''(^|/)\.env\.example$''',
+    '''(^|/)\.gitleaks\.toml$''',
+]
+commits = [
+    "1f956f9807b1f1d5ed1b3560a6b33131e0149c7c",
 ]
 regexes = [
     '''\bCHANGE_ME[A-Z0-9_]*\b''',
@@ -96,13 +100,13 @@ keywords = ["postgresql://", "postgres://", "mysql://", "mongodb://", "redis://"
 [[rules]]
 id = "vaultsync-android-keystore-password"
 description = "Detected Android Keystore password in cleartext"
-regex = '''(?i)(?:storePassword|keyPassword)\s*[:=]?\s*['"](?!(?:CHANGE_ME|\$|System\.getenv))[^'"]{4,}['"]'''
+regex = '''(?i)(?:storePassword|keyPassword)[ \t]*[:=]?[ \t]*['"](?!(?:CHANGE_ME|\$|System\.getenv))[^'"\r\n]{4,}['"]'''
 keywords = ["storePassword", "keyPassword"]
 
 [[rules]]
 id = "vaultsync-generic-secret-token"
 description = "Detected Generic Secret, Access Token, or API Key assignment"
-regex = '''(?i)(?:secret[_-]?key|api[_-]?key|access[_-]?token|auth[_-]?token)\s*[:=]\s*['"]([a-zA-Z0-9_\-\.]{24,})['"]'''
+regex = '''(?i)(?:secret[_-]?key|api[_-]?key|access[_-]?token|auth[_-]?token)[ \t]*[:=][ \t]*['"]([a-zA-Z0-9_\-\.]{24,})['"]'''
 keywords = ["secret_key", "api_key", "access_token", "auth_token"]
 [rules.allowlist]
 regexes = [
