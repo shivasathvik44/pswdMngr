@@ -198,6 +198,7 @@ class ApiClientTest {
 
         assertEquals("ok", resp.status)
         assertEquals(3, resp.vaultKeyVersion)
+        assertEquals(3, resp.vaultKeyRevision)
 
         val recordedRequest = server.takeRequest()
         assertEquals("/api/v1/auth/vault-key", recordedRequest.path)
@@ -206,6 +207,7 @@ class ApiClientTest {
         assertTrue("Request body must include wrapped_vault_key", body.contains("\"wrapped_vault_key\":\"{\\\"alg\\\":\\\"AES-256-GCM\\\"}\""))
         assertTrue("Request body must include kdf_salt", body.contains("\"kdf_salt\":\"c2FsdDEyMzQ1Njc4OQ==\""))
         assertTrue("Request body must include expected_version", body.contains("\"expected_version\":2"))
+        assertTrue("Request body must include expected_revision", body.contains("\"expected_revision\":2"))
         assertTrue("Request body must include current_password", body.contains("\"current_password\":\"testAccountPassword123!\""))
     }
 

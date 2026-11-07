@@ -419,13 +419,33 @@ class VaultSession:
 
         gen = self.lock_generation
         new_salt_b64, new_envelope_json = rotate_master_password(self._vault_key, new_master_password)
-        res = await self.api.update_vault_key(
-            wrapped_vault_key=new_envelope_json,
-            kdf_salt=new_salt_b64,
-            expected_version=self.vault_key_version,
-            current_password=acc_pw,
-        )
+        try:
+            res = await self.api.update_vault_key(
+                wrapped_vault_key=new_envelope_json,
+                kdf_salt=new_salt_b64,
+                expected_version=self.vault_key_version,
+                expected_revision=self.vault_key_version,
+                current_password=acc_pw,
+            )
+        except ConflictError:
+            # Concurrency conflict (SEC-NEW-01):
+            # 1. Stop current update operation.
+            # 2. Do not automatically overwrite the newer metadata.
+            # 3. Refresh latest vault-key metadata from server.
+            try:
+                latest_vk = await self.api.get_vault_key()
+                self.vault_key_version = latest_vk.get("vault_key_revision") or latest_vk.get("vault_key_version", self.vault_key_version)
+                self.kdf_salt = latest_vk.get("kdf_salt", self.kdf_salt)
+                self.wrapped_vault_key = latest_vk.get("wrapped_vault_key", self.wrapped_vault_key)
+            except Exception as refresh_exc:
+                logger.warning("Failed to refresh vault-key metadata after conflict: %s", refresh_exc)
+            # 4. Re-raise ConflictError to trigger safe UI recovery state
+            raise
+
+        if not self.is_unlocked or self.lock_generation != gen:
+            return
+
         # Server accepted new wrapped key; synchronize local metadata immediately
         self.kdf_salt = new_salt_b64
         self.wrapped_vault_key = new_envelope_json
-        self.vault_key_version = res.get("vault_key_version", self.vault_key_version + 1)
+        self.vault_key_version = res.get("vault_key_revision") or res.get("vault_key_version", self.vault_key_version + 1)

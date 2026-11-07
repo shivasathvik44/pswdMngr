@@ -221,6 +221,7 @@ async def login(
         kdf_salt=account.kdf_salt,
         wrapped_vault_key=account.wrapped_vault_key,
         vault_key_version=account.vault_key_version,
+        vault_key_revision=account.vault_key_version,
     )
 
 
@@ -422,13 +423,14 @@ async def update_vault_key(
             detail="KDF salt in envelope does not match request kdf_salt",
         )
 
-    # 5. Atomic conditional update enforcing expected_version
+    # 5. Atomic conditional update enforcing expected_revision
+    expected_rev = req.expected_revision if req.expected_revision is not None else req.expected_version
     now = datetime.now(timezone.utc)
     update_stmt = (
         update(Account)
         .where(
             Account.id == account.id,
-            Account.vault_key_version == req.expected_version,
+            Account.vault_key_version == expected_rev,
         )
         .values(
             wrapped_vault_key=req.wrapped_vault_key,
@@ -447,7 +449,7 @@ async def update_vault_key(
         ).scalar_one()
 
         if (
-            current_acc.vault_key_version == req.expected_version + 1
+            current_acc.vault_key_version == expected_rev + 1
             and current_acc.wrapped_vault_key == req.wrapped_vault_key
             and current_acc.kdf_salt == req.kdf_salt
         ):
@@ -456,14 +458,16 @@ async def update_vault_key(
                 status="ok",
                 message="Wrapped vault key updated successfully",
                 vault_key_version=current_acc.vault_key_version,
+                vault_key_revision=current_acc.vault_key_version,
             )
 
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                f"Conflict: expected vault key version {req.expected_version}, "
-                f"but current version is {current_acc.vault_key_version}"
+                f"Conflict: expected vault key revision {expected_rev}, "
+                f"but current revision is {current_acc.vault_key_version}"
             ),
+            headers={"X-Current-Revision": str(current_acc.vault_key_version)},
         )
 
     db.commit()
@@ -471,6 +475,7 @@ async def update_vault_key(
         status="ok",
         message="Wrapped vault key updated successfully",
         vault_key_version=result,
+        vault_key_revision=result,
     )
 
 
@@ -483,11 +488,12 @@ async def update_vault_key(
 async def get_vault_key(
     auth_data: Annotated[tuple[Account, Session], Depends(get_current_session)],
 ) -> VaultKeyResponse:
-    """Retrieve the current wrapped vault key envelope, KDF salt, and version for the calling session."""
+    """Retrieve the current wrapped vault key envelope, KDF salt, and revision for the calling session."""
     account, _ = auth_data
     return VaultKeyResponse(
         wrapped_vault_key=account.wrapped_vault_key,
         kdf_salt=account.kdf_salt,
         vault_key_version=account.vault_key_version,
+        vault_key_revision=account.vault_key_version,
     )
 

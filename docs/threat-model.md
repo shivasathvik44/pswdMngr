@@ -199,3 +199,7 @@ This document identifies security boundaries, adversaries, potential threats, de
 - **Weakness**: Configuration files and directories were created with default umask permissions, potentially allowing other local users on a multi-user Linux machine to inspect configuration metadata.
 - **Remediation**: Client now explicitly enforces POSIX `0700` directory and `0600` file permissions on `~/.config/vaultsync`.
 
+### 5.10 Stale Vault-Key Overwrite & Concurrency Race (SEC-NEW-01)
+- **Threat**: In multi-device setups, if two clients update the master password / wrapped vault key envelope around the same time or a stale device reconnects, an unversioned `PUT /auth/vault-key` allows the stale device to silently overwrite a newer wrapped vault key and KDF salt, potentially locking out other devices or causing metadata divergence.
+- **Remediation**: Implemented optimistic concurrency control via monotonic `vault_key_revision` on `PUT /api/v1/auth/vault-key`. Every update requires `expected_revision` and executes an atomic conditional SQL `UPDATE ... WHERE vault_key_version = :expected_revision`. Stale updates return HTTP 409 Conflict with non-sensitive details and `X-Current-Revision`. Desktop and Android clients abort rotation, refresh latest vault-key metadata, and require explicit user decision without automatic retry.
+

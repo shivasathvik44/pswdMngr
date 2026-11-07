@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from vaultsync_desktop.api_client import ConflictError
 from vaultsync_desktop.async_bridge import run_async
 from vaultsync_desktop.core import VaultSession
 from vaultsync_desktop.ui.widgets.passphrase_strength import PassphraseStrengthWidget
@@ -307,9 +308,22 @@ class SettingsScreen(QWidget):
         run_async(
             self.session.rotate_vault_master_password(new_pwd),
             on_success=self._on_rotate_master_pwd_success,
-            on_error=lambda exc: self._show_feedback(f"Failed to rotate master password: {exc}", is_error=True) if self.session.is_unlocked else None,
+            on_error=self._on_rotate_master_pwd_error,
             on_finally=self._on_rotate_master_pwd_finally,
         )
+
+    def _on_rotate_master_pwd_error(self, exc: Exception) -> None:
+        if not self.session.is_unlocked:
+            return
+        if isinstance(exc, ConflictError) or "conflict" in str(exc).lower():
+            self._show_feedback(
+                "⚠️ Concurrency Conflict: Another device has updated the vault-key state (stale revision). "
+                "The latest key metadata has been refreshed from the server. "
+                "Please verify your credentials before attempting a retry.",
+                is_error=True,
+            )
+        else:
+            self._show_feedback(f"Failed to rotate master password: {exc}", is_error=True)
 
     def _on_rotate_master_pwd_success(self, _: Any) -> None:
         if not self.session.is_unlocked:

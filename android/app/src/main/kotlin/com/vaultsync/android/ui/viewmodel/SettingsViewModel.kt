@@ -2,6 +2,7 @@ package com.vaultsync.android.ui.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.vaultsync.android.api.ConflictException
 import com.vaultsync.android.repository.VaultRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -126,6 +127,15 @@ class SettingsViewModel(
             } catch (e: CancellationException) {
                 _uiState.value = _uiState.value.copy(isLoading = false)
                 throw e
+            } catch (e: ConflictException) {
+                try {
+                    repository.fetchVaultKey()
+                } catch (ignored: Exception) {
+                }
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    errorMessage = "Vault-key revision conflict: Another device has changed the vault master password. Latest key metadata has been refreshed from the server. Please verify your credentials before retrying."
+                )
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,

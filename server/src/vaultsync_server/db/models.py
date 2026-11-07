@@ -45,6 +45,11 @@ class Account(Base):
     vault_key_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     requires_password_migration: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    @property
+    def vault_key_revision(self) -> int:
+        """Monotonically increasing vault-key revision counter (SEC-NEW-01)."""
+        return self.vault_key_version
     
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

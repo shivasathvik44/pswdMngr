@@ -220,12 +220,15 @@ class ApiClient:
         kdf_salt: str,
         expected_version: int,
         current_password: str,
+        expected_revision: Optional[int] = None,
     ) -> dict[str, Any]:
         """Update wrapped vault key envelope and salt (master password rotation)."""
+        rev = expected_revision if expected_revision is not None else expected_version
         payload = {
             "wrapped_vault_key": wrapped_vault_key,
             "kdf_salt": kdf_salt,
-            "expected_version": expected_version,
+            "expected_version": rev,
+            "expected_revision": rev,
             "current_password": current_password,
         }
         return await self._request("PUT", "/api/v1/auth/vault-key", json_data=payload)

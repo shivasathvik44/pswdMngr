@@ -184,6 +184,22 @@ This cryptographic binding guarantees that ciphertext envelopes cannot be swappe
 ### 5.3 Monotonic Sync Cursor Allocation (SEC-01)
 To ensure multi-client synchronization integrity, record creation and update transactions execute inside an `exclusive_transaction()` context. Cursors are incremented monotonically under SQLite `BEGIN EXCLUSIVE` locking, preventing duplicate cursors or cursor gaps during concurrent writes.
 
+### 5.4 Atomic Vault-Key Revision Protection (SEC-NEW-01)
+To protect wrapped vault-key metadata (`wrapped_vault_key` envelope and public `kdf_salt`) against lost updates and concurrent overwrites across multiple devices, `PUT /api/v1/auth/vault-key` enforces optimistic concurrency control:
+- **Monotonic Revision Counter**: Stored in `Account.vault_key_version` / `vault_key_revision`, starting at 1 upon registration.
+- **Atomic Conditional Mutation**: The update executes as an atomic database-level conditional statement:
+  ```sql
+  UPDATE accounts
+  SET wrapped_vault_key = :wrapped_vault_key,
+      kdf_salt = :kdf_salt,
+      vault_key_version = accounts.vault_key_version + 1,
+      updated_at = :now
+  WHERE accounts.id = :account_id AND accounts.vault_key_version = :expected_revision;
+  ```
+- **Conflict Handling (HTTP 409)**: If the client submits a stale `expected_revision`, the conditional statement updates 0 rows. The server returns HTTP 409 Conflict with `X-Current-Revision` without mutating database state.
+- **Client Recovery Invariant**: Clients (Desktop & Android) MUST abort the rotation, refresh the latest metadata from the server, and prompt the user for an explicit decision. Automatic retries using the new revision without re-authenticating the underlying cryptographic keys are strictly prohibited.
+- **Backward Compatibility**: Legacy clients sending `expected_version` are seamlessly supported as an alias, while requests omitting both revision fields are rejected with HTTP 422.
+
 ---
 
 ## 6. Logging & Sensitive Data Handling

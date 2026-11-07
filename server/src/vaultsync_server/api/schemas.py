@@ -2,7 +2,8 @@
 
 import uuid
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Any
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class RegisterRequest(BaseModel):
@@ -45,6 +46,16 @@ class LoginResponse(BaseModel):
     kdf_salt: str
     wrapped_vault_key: str | None
     vault_key_version: int = 1
+    vault_key_revision: int = 1
+
+    @model_validator(mode="before")
+    @classmethod
+    def sync_version_revision(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            ver = data.get("vault_key_version") or data.get("vault_key_revision") or 1
+            data.setdefault("vault_key_version", ver)
+            data.setdefault("vault_key_revision", ver)
+        return data
 
 
 class SaltResponse(BaseModel):
@@ -61,25 +72,59 @@ class AccountPasswordChangeRequest(BaseModel):
 
 
 class VaultKeyUpdateRequest(BaseModel):
-    """Request to update wrapped vault key envelope and fresh public KDF salt with step-up auth and version locking."""
+    """Request to update wrapped vault key envelope and fresh public KDF salt with step-up auth and revision locking."""
     model_config = ConfigDict(extra="forbid")
 
     wrapped_vault_key: str = Field(min_length=10, max_length=4096)
     kdf_salt: str = Field(min_length=16, max_length=64, description="Base64 encoded 16-byte KDF salt")
-    expected_version: int = Field(ge=0, description="Expected current vault key version")
+    expected_revision: int | None = Field(default=None, ge=0, description="Expected current vault key revision")
+    expected_version: int | None = Field(default=None, ge=0, description="Legacy alias for expected_revision")
     current_password: str = Field(min_length=8, max_length=256, description="Account password for step-up authorization")
+
+    @model_validator(mode="after")
+    def validate_revision_fields(self) -> "VaultKeyUpdateRequest":
+        if self.expected_revision is None and self.expected_version is None:
+            raise ValueError("expected_revision is required for atomic concurrency protection")
+        if self.expected_revision is not None and self.expected_version is not None:
+            if self.expected_revision != self.expected_version:
+                raise ValueError("expected_revision and expected_version must match")
+        if self.expected_revision is None:
+            self.expected_revision = self.expected_version
+        if self.expected_version is None:
+            self.expected_version = self.expected_revision
+        return self
 
 
 class VaultKeyResponse(BaseModel):
     wrapped_vault_key: str | None
     kdf_salt: str
-    vault_key_version: int
+    vault_key_version: int = 1
+    vault_key_revision: int = 1
+
+    @model_validator(mode="before")
+    @classmethod
+    def sync_version_revision(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            ver = data.get("vault_key_version") or data.get("vault_key_revision") or 1
+            data.setdefault("vault_key_version", ver)
+            data.setdefault("vault_key_revision", ver)
+        return data
 
 
 class VaultKeyUpdateResponse(BaseModel):
     status: str = "ok"
     message: str = "Wrapped vault key updated successfully"
-    vault_key_version: int
+    vault_key_version: int = 1
+    vault_key_revision: int = 1
+
+    @model_validator(mode="before")
+    @classmethod
+    def sync_version_revision(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            ver = data.get("vault_key_version") or data.get("vault_key_revision") or 1
+            data.setdefault("vault_key_version", ver)
+            data.setdefault("vault_key_revision", ver)
+        return data
 
 
 class SessionItem(BaseModel):

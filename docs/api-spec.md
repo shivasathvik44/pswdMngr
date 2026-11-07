@@ -147,30 +147,37 @@ VaultSync enforces strict cryptographic credential separation between client-sid
   {
     "wrapped_vault_key": "{\"version\":1,\"algorithm\":\"AES-256-GCM\",\"kdf\":{...},\"nonce\":\"...\",\"ciphertext\":\"...\"}",
     "kdf_salt": "MDEyMzQ1Njc4OWFiY2RlZg==",
+    "expected_revision": 1,
     "expected_version": 1,
     "current_password": "AccountPassword123!"
   }
   ```
-- **Semantics**:
-  - Used during master password rotation.
+- **Semantics (SEC-NEW-01: Atomic Vault-Key Revision Protection)**:
+  - Used during master password rotation to update the encrypted VEK envelope and public KDF salt.
   - Requires step-up authentication using the account password (`current_password`).
-  - Validates `WrappedKeyEnvelope` structure and consistency with public `kdf_salt`.
-  - Performs an atomic conditional database update enforcing `expected_version` to prevent concurrent or stale overwrites.
-  - Supports safe idempotent retries if a network disruption interrupts response delivery.
+  - **Mandatory Revision Guard**: Client must submit `expected_revision` (or `expected_version` for legacy compatibility) matching the observed revision.
+  - Performs an atomic conditional SQL update (`WHERE id = :account_id AND vault_key_version = :expected_revision`) incrementing `vault_key_version` by 1.
+  - Revisions are monotonically increasing: starts at 1, increments on successful replacements, never resets or decreases.
   - Encrypted records do not require re-encryption because the underlying VEK is preserved.
-  - Account password and `account_password_hash` are unchanged.
+  - Supports safe idempotent retries if an identical request is re-transmitted after an interrupted response.
+  - **Backward Compatibility**: Accepts legacy `expected_version` alias. Requests omitting both revision fields are rejected with `422 Unprocessable Entity`.
 - **Response 200 OK**:
   ```json
   {
     "status": "ok",
     "message": "Wrapped vault key updated successfully",
+    "vault_key_revision": 2,
     "vault_key_version": 2
   }
   ```
 - **Error Responses**:
   - `400 Bad Request`: Malformed JSON envelope, invalid salt encoding, or envelope salt does not match payload `kdf_salt`.
   - `401 Unauthorized`: Invalid session token or incorrect account password.
-  - `409 Conflict`: Stale or mismatched `expected_version`.
+  - `409 Conflict`: Stale revision collision (`expected_revision` does not match current server revision).
+    - Response includes `X-Current-Revision` header and structured detail: `Conflict: expected vault key revision {expected_revision}, but current revision is {current_revision}`.
+    - Server does not modify any metadata or increment the revision.
+    - **Client Recovery Procedure**: The client must stop the rotation, refresh latest vault-key metadata via `GET /auth/vault-key`, notify the user that another device rotated the master password, and require an explicit re-authentication / recovery decision. Clients MUST NEVER automatically retry with the new revision without validating cryptographic key material.
+  - `422 Unprocessable Entity`: Missing `expected_revision` or conflicting revision aliases.
   - `429 Too Many Requests`: Rate limit exceeded for step-up authorization.
 
 #### `GET /api/v1/auth/vault-key`
@@ -180,6 +187,7 @@ VaultSync enforces strict cryptographic credential separation between client-sid
   {
     "wrapped_vault_key": "<json_string_wrapped_key_envelope_or_null>",
     "kdf_salt": "MDEyMzQ1Njc4OWFiY2RlZg==",
+    "vault_key_revision": 1,
     "vault_key_version": 1
   }
   ```

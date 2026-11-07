@@ -1417,6 +1417,7 @@ class VaultRepository(
                 wrappedVaultKey = newEnvelopeJson,
                 kdfSalt = newSaltBase64,
                 expectedVersion = expectedVer,
+                expectedRevision = expectedVer,
                 currentPassword = accPass
             )
 
