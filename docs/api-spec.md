@@ -254,6 +254,16 @@ VaultSync enforces strict cryptographic credential separation between client-sid
     "updated_at": "2026-10-11T00:40:00+00:00"
   }
   ```
+- **Error Responses**:
+  - `400 Bad Request`: Malformed encrypted envelope or payload `record_id` does not match request body `record_id`.
+  - `409 Conflict`:
+    - Record already exists and is active (`is_deleted = false`). Client must use `PUT` to update with `expected_revision`.
+    - **Tombstone Resurrection Protection (SEC-NEW-02)**: Record with this ID was previously deleted on another device (`is_deleted = true`). Silent resurrection via `POST` is strictly blocked:
+      ```json
+      {
+        "detail": "Record with this ID was previously deleted (tombstone exists). To recreate, use a new record ID or synchronize."
+      }
+      ```
 
 #### `PUT /api/v1/records/{record_id}`
 - **Atomic Optimistic Concurrency**: Requires client to supply `expected_revision`. The server updates the record atomically via a database conditional `WHERE revision = expected_revision AND is_deleted = false` clause. If the condition is not met, the update is rejected with `409 Conflict`, leaving the record and cursor completely unchanged.
@@ -276,16 +286,27 @@ VaultSync enforces strict cryptographic credential separation between client-sid
     "updated_at": "2026-10-11T00:42:00+00:00"
   }
   ```
-- **Error Response 409 Conflict**:
-  ```json
-  {
-    "detail": "Conflict: expected revision 1, but current revision is 2"
-  }
-  ```
+- **Error Responses**:
+  - `400 Bad Request`: Payload `record_id` does not match path parameter `record_id` or envelope is malformed.
+  - `404 Not Found`: Record does not exist under this account.
+  - `409 Conflict`:
+    - **Revision Mismatch**: Current server revision differs from `expected_revision`:
+      ```json
+      {
+        "detail": "Conflict: expected revision 1, but current revision is 2"
+      }
+      ```
+    - **Deleted Record Conflict (SEC-NEW-02)**: Record was deleted on another device (`is_deleted = true`). Rather than returning `404 Not Found` (which could mislead a client into issuing a resurrecting `POST`), the server explicitly informs the client:
+      ```json
+      {
+        "detail": "Conflict: record d3b07384-d113-4674-8b6a-939e144a14d5 was deleted on another device (tombstone revision 2). Cannot update a deleted record. Resynchronize to apply deletion."
+      }
+      ```
 
 #### `DELETE /api/v1/records/{record_id}?expected_revision=2`
 - **Mandatory Revision Guard**: Requires `expected_revision` query parameter. Omitting it returns `400 Bad Request`.
 - **Tombstone Semantics**: Atomically checks `revision = expected_revision AND is_deleted = false`. Sets `is_deleted = true`, purges `ciphertext_payload = ""`, increments `revision = revision + 1`, and allocates next `sync_cursor`.
+- **Zero-Knowledge Ciphertext Scrubbing**: On deletion, sensitive ciphertext payload is immediately scrubbed to empty string `""` in the database, preventing storage of unneeded ciphertext.
 - **Response 200 OK**:
   ```json
   {
@@ -297,8 +318,8 @@ VaultSync enforces strict cryptographic credential separation between client-sid
   ```
 - **Error Responses**:
   - `400 Bad Request`: Missing `expected_revision` query parameter.
-  - `404 Not Found`: Record does not exist or is already deleted.
-  - `409 Conflict`: Stale `expected_revision` does not match server revision.
+  - `404 Not Found`: Record does not exist or was already tombstoned.
+  - `409 Conflict`: Stale `expected_revision` does not match current active server revision.
 
 ---
 

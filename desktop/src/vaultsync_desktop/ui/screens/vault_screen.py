@@ -422,11 +422,19 @@ class VaultScreen(QWidget):
         if not self.session.is_unlocked:
             return
         if isinstance(exc, ConflictError):
-            self._show_banner(
-                "<b>Conflict Detected:</b> This item was modified on another device (revision mismatch). "
-                "Please click '🔄 Sync' to review the current version.",
-                is_error=True,
-            )
+            err_msg = str(exc)
+            if "deleted" in err_msg.lower():
+                self._show_banner(
+                    "<b>Conflict Detected:</b> This item was deleted on another device. "
+                    "Your local changes were preserved in the editor. Please click '🔄 Sync' to reconcile or save as a new item.",
+                    is_error=True,
+                )
+            else:
+                self._show_banner(
+                    "<b>Conflict Detected:</b> This item was modified on another device (revision mismatch). "
+                    "Your local edits were preserved in the editor. Please click '🔄 Sync' to review the current version.",
+                    is_error=True,
+                )
         else:
             self._show_banner(f"Failed to save item: {exc}", is_error=True)
 
@@ -452,10 +460,22 @@ class VaultScreen(QWidget):
                 self._show_placeholder()
                 self._show_banner("✓ Vault item deleted.", is_error=False)
 
+            def _on_delete_error(exc: Exception) -> None:
+                if not self.session.is_unlocked:
+                    return
+                if isinstance(exc, ConflictError):
+                    self._show_banner(
+                        "<b>Conflict Detected:</b> This item was modified on another device before deletion. "
+                        "Please click '🔄 Sync' to review before deleting.",
+                        is_error=True,
+                    )
+                else:
+                    self._show_banner(f"Failed to delete item: {exc}", is_error=True)
+
             run_async(
                 self.session.delete_item(item_id),
                 on_success=_on_delete_success,
-                on_error=lambda exc: self._show_banner(f"Failed to delete item: {exc}", is_error=True) if self.session.is_unlocked else None,
+                on_error=_on_delete_error,
                 on_finally=lambda: self.delete_btn.setEnabled(True),
             )
 

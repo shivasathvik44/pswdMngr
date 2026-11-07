@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.PersistableBundle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.vaultsync.android.api.ConflictException
 import com.vaultsync.android.model.VaultItem
 import com.vaultsync.android.repository.VaultRepository
 import kotlinx.coroutines.CancellationException
@@ -154,6 +155,11 @@ class VaultViewModel(
                     selectedItem = item
                 )
                 onSuccess()
+            } catch (e: ConflictException) {
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    errorMessage = "Conflict: This item was modified or deleted on another device. Please sync to resolve."
+                )
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
@@ -173,6 +179,11 @@ class VaultViewModel(
                     selectedItem = null
                 )
                 onSuccess()
+            } catch (e: ConflictException) {
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    errorMessage = "Conflict: This item was modified on another device before deletion. Please sync to review."
+                )
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,

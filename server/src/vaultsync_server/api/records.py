@@ -61,7 +61,12 @@ async def create_record(
     )
     existing = db.execute(stmt).scalar_one_or_none()
 
-    if existing and not existing.is_deleted:
+    if existing:
+        if existing.is_deleted:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Record with this ID was previously deleted (tombstone exists). To recreate, use a new record ID or synchronize.",
+            )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Record already exists. Use PUT to update.",
@@ -77,26 +82,17 @@ async def create_record(
     new_cursor = db.execute(cursor_stmt).scalar_one()
     now = datetime.now(timezone.utc)
 
-    if existing:
-        # Resurrect previously tombstoned record
-        existing.ciphertext_payload = req.ciphertext_payload
-        existing.is_deleted = False
-        existing.revision += 1
-        existing.sync_cursor = new_cursor
-        existing.updated_at = now
-        record = existing
-    else:
-        record = EncryptedRecord(
-            record_id=req.record_id,
-            account_id=account.id,
-            ciphertext_payload=req.ciphertext_payload,
-            revision=1,
-            sync_cursor=new_cursor,
-            is_deleted=False,
-            created_at=now,
-            updated_at=now,
-        )
-        db.add(record)
+    record = EncryptedRecord(
+        record_id=req.record_id,
+        account_id=account.id,
+        ciphertext_payload=req.ciphertext_payload,
+        revision=1,
+        sync_cursor=new_cursor,
+        is_deleted=False,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(record)
 
     db.commit()
     db.refresh(record)
@@ -207,10 +203,19 @@ async def update_record(
             )
         ).scalar_one_or_none()
 
-        if not record or record.is_deleted:
+        if not record:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Record not found",
+            )
+        if record.is_deleted:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Conflict: record {record_id} was deleted on another device "
+                    f"(tombstone revision {record.revision}). Cannot update a deleted record. "
+                    "Resynchronize to apply deletion."
+                ),
             )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

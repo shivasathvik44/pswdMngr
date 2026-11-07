@@ -67,22 +67,25 @@ This document identifies security boundaries, adversaries, potential threats, de
 - **Limitations**: If a device is seized in an actively unlocked state with live memory access (cold-boot or forensic memory dump), keys in volatile RAM may be extracted.
 
 ### 2.6 Malicious or Compromised Clients
-- **Threat**: A compromised client uploads corrupted data, malicious blobs, or oversized payloads to exhaust server disk space.
+- **Threat**: A compromised client uploads corrupted data, malicious blobs, or oversized payloads to exhaust server disk space, or attempts to resurrect deleted records.
 - **Mitigation**:
   - Strict Pydantic payload validation limits blob sizes and schema compliance (maximum 2 MiB per record).
   - Rate limiting per session and per IP.
   - Atomic optimistic concurrency and mandatory expected revision on deletion prevent stale or concurrent overwrites.
+  - **Tombstone Resurrection Blocking (SEC-NEW-02)**: `POST /api/v1/records` rejects any attempt to recreate a record under a previously tombstoned `record_id` with `409 Conflict`.
+  - **Tombstone Zero-Knowledge Scrubbing**: When a record is deleted, `ciphertext_payload` is immediately wiped (`""`), preventing retention of obsolete ciphertext.
 - **Limitations**:
-  - VaultSync implements a **latest-state synchronization model**, NOT an immutable audit ledger or point-in-time recovery system. Intermediate record revisions are overwritten by subsequent updates; the database does not maintain historical versions or durable rollback history.
+  - VaultSync implements a **latest-state synchronization model (Option A)**, NOT an immutable audit ledger or point-in-time recovery system. Intermediate record revisions are overwritten by subsequent updates; the database does not maintain historical versions or durable rollback history.
   - A compromised client possessing the vault master password has legitimate cryptographic access to write valid ciphertext to the vault or tombstone records.
 
 ### 2.7 Concurrent Updates, Replays, and Rollback Boundaries
-- **Threat**: Two devices modify the same record offline, or an attacker attempts to replay older synchronization requests.
+- **Threat**: Two devices modify the same record offline, or an attacker attempts to replay older synchronization requests, or update a deleted record.
 - **Mitigation**:
   - Monotonic account-level sync cursors and atomic per-record revision increments.
   - Atomic database-level conditional writes (`WHERE revision = expected_revision AND is_deleted = false`) reject stale updates with `409 Conflict`.
   - Mandatory `expected_revision` parameter on `DELETE` ensures deletions cannot destroy newer revisions.
   - Durable tombstones ensure deleted records propagate consistently to offline clients during incremental catch-up sync.
+  - **Conflict Differentiation (SEC-NEW-02)**: Stale `PUT` requests against tombstoned records return `409 Conflict` (specifying deletion status and tombstone revision) instead of `404 Not Found`, preventing clients from inadvertently assuming the record never existed.
 - **Limitations & Cryptographic Boundaries**:
   - Record-level Authenticated Additional Data (AAD) binds ciphertext strictly to its `record_id`, preventing cross-record relocation. However, **AAD alone does not prevent an untrusted server from replaying an earlier valid ciphertext for that same record ID**; freshness verification depends on client-side revision checks.
   - True concurrent edits to the same item require user resolution rather than automatic field-level merging, as the server cannot inspect fields within the opaque ciphertext.

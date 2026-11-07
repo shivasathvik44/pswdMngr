@@ -200,6 +200,31 @@ To protect wrapped vault-key metadata (`wrapped_vault_key` envelope and public `
 - **Client Recovery Invariant**: Clients (Desktop & Android) MUST abort the rotation, refresh the latest metadata from the server, and prompt the user for an explicit decision. Automatic retries using the new revision without re-authenticating the underlying cryptographic keys are strictly prohibited.
 - **Backward Compatibility**: Legacy clients sending `expected_version` are seamlessly supported as an alias, while requests omitting both revision fields are rejected with HTTP 422.
 
+### 5.5 Synchronization History, Conflict Semantics & Tombstones (SEC-NEW-02)
+To guarantee consistency across distributed offline clients without sacrificing zero-knowledge privacy, VaultSync operates under **Option A: Latest-State Synchronization with Hardened Tombstones**:
+
+1. **Option A Model Rationale**:
+   - **Zero-Knowledge Privacy**: Password managers must securely purge deleted credentials. Option B (append-only journals) permanently retains old ciphertexts, leaking modification frequencies, record count trajectories, and ciphertext sizes. Option A scrubs `ciphertext_payload = ""` immediately on deletion.
+   - **Storage Boundaries**: VaultSync maintains an $O(1)$ row footprint per record in SQLite, avoiding unbounded journal expansion and complex compaction routines that can break long-offline clients.
+   - **Cryptographic Merge Reality**: Because vault payloads are client-side encrypted with AES-256-GCM, the server cannot inspect fields to perform 3-way automatic merging. Stale updates and competing modifications strictly require client-side optimistic concurrency control (`expected_revision`) regardless of journal storage.
+
+2. **Tombstone Lifecycle & Resurrection Prevention**:
+   - Deleting a record (`DELETE /api/v1/records/{id}?expected_revision=N`) creates a permanent tombstone (`is_deleted = true`, `ciphertext_payload = ""`, `revision = N + 1`, and increments `sync_cursor`).
+   - Tombstones are retained indefinitely to guarantee that long-offline devices receiving incremental catch-up syncs learn of deletions and purge their local stores.
+   - **Accidental Resurrection Prevention**: `POST /api/v1/records` rejects attempts to reuse an existing tombstoned `record_id` with `HTTP 409 Conflict`. Recreating an item requires a newly generated UUID.
+   - **Deleted Record Conflict Differentiation**: `PUT /api/v1/records/{id}` on a tombstoned record returns `HTTP 409 Conflict` (specifying that the record was deleted on another device), rather than `404 Not Found`. This prevents stale clients from falling back to `POST` and resurrecting dead records.
+
+3. **Deterministic Concurrent Modification Behavior**:
+   - **Scenario 1 (Offline Edit vs Later Sync)**: Device A updates a record to Rev 2 and then Rev 3 while Device B is offline. On sync, Device B receives strictly the latest state (Rev 3); intermediate revisions are cleanly superseded.
+   - **Scenario 2 (Competing Edits)**: Devices A and B edit Rev 1 simultaneously. The first update to reach the database succeeds (Rev 2); the second update fails atomically with `409 Conflict`. Device B retains local edits in its editor, syncs the remote revision, and prompts the user to reconcile or save under a new ID.
+   - **Scenario 3 (Update vs Deletion)**: Device A deletes Rev 1; Device B attempts to update Rev 1. Device B receives `409 Conflict` with tombstone details. Device B's update is aborted; local edits are kept in the editor without resurrecting the record.
+   - **Scenario 4 (Stale Cursor Sync)**: A client submitting a `since_cursor` beyond the current account `server_cursor` receives `400 Bad Request` and must re-baseline from cursor 0.
+
+4. **Recovery Limitations**:
+   - VaultSync is a **latest-state synchronization system**, not a historical backup archive.
+   - Overwritten intermediate edits and purged ciphertext from deleted records cannot be recovered from the server database.
+   - Durability and historical recovery require independent, periodic offline client-side database backups (e.g. via [`docs/recovery.md`](recovery.md)).
+
 ---
 
 ## 6. Logging & Sensitive Data Handling
