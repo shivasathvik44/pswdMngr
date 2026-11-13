@@ -4,16 +4,19 @@ Exercises ApiClient and VaultSession directly against the real FastAPI ASGI app,
 real SQLAlchemy models, real SQLite database, and real cryptographic verification.
 """
 
+import uuid
 from pathlib import Path
 from typing import AsyncGenerator
 import pytest
-from httpx import ASGITransport
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.orm import sessionmaker
 
 from vaultsync_server.config import settings
-from vaultsync_server.crypto.envelope import EncryptedRecordEnvelope, WrappedKeyEnvelope
+from vaultsync_server.crypto.envelope import EncryptedRecordEnvelope, WrappedKeyEnvelope, b64encode
 from vaultsync_server.crypto.errors import DecryptionFailedError
-from vaultsync_server.crypto.records import decrypt_record
+from vaultsync_server.crypto.kdf import Argon2Params, derive_kek, generate_salt
+from vaultsync_server.crypto.records import decrypt_record, encrypt_record
+from vaultsync_server.crypto.vault_keys import VaultKey, wrap_vault_key
 from vaultsync_server.db.base import Base, create_db_engine, get_db
 from vaultsync_server.db.models import Account, EncryptedRecord, Session
 from vaultsync_server.main import create_app
@@ -651,4 +654,138 @@ async def test_real_backend_corrupted_ciphertext_gracefully_handled(make_session
     assert item_valid.id in client_session.items
     assert client_session.items[item_valid.id].password == "ValidSecretPassword123!"
     assert item_corrupt.id not in client_session.items
+
+
+# ============================================================================
+# 8. SEC-NEW-01 & SEC-NEW-02 Desktop Conflict & Revision Handling
+# ============================================================================
+
+
+@pytest.mark.anyio
+async def test_sec_new_01_desktop_client_revision_and_conflict_handling(integration_app):
+    """Verify that desktop client includes expected_revision, detects 409, and refreshes."""
+    app, _ = integration_app
+    transport = ASGITransport(app=app)
+    api = ApiClient(base_url="http://127.0.0.1:8000", transport=transport)
+    session = VaultSession(api=api)
+
+    username = f"desktop_sec01_{uuid.uuid4().hex[:6]}"
+    account_password = "DesktopAccPassword123!"
+    master_password = "OriginalMasterPass1!"
+
+    # Register, login and unlock via desktop session
+    await session.register_account(
+        username=username,
+        account_password=account_password,
+        vault_master_password=master_password,
+    )
+    await session.login_account(
+        username=username,
+        account_password=account_password,
+    )
+    await session.unlock_vault(master_password)
+    assert session.vault_key_version == 1
+    assert session.is_unlocked is True
+
+    # Another device concurrently updates the vault key to revision 2 behind our back
+    async with AsyncClient(transport=transport, base_url="http://testserver") as other_client:
+        login_res = await other_client.post("/api/v1/auth/login", json={
+            "username": username,
+            "account_password": account_password,
+        })
+        other_token = login_res.json()["session_token"]
+        other_headers = {"Authorization": f"Bearer {other_token}"}
+
+        salt = generate_salt()
+        salt_b64 = b64encode(salt)
+        params = Argon2Params(memory_cost=16384, time_cost=1, parallelism=2, salt=salt)
+        kek = derive_kek("OtherDeviceMasterPass!", params)
+        new_wrap = wrap_vault_key(session._vault_key, kek, params)
+
+        concurrent_res = await other_client.put("/api/v1/auth/vault-key", headers=other_headers, json={
+            "wrapped_vault_key": new_wrap.to_json(),
+            "kdf_salt": salt_b64,
+            "expected_revision": 1,
+            "current_password": account_password,
+        })
+        assert concurrent_res.status_code == 200
+        assert concurrent_res.json()["vault_key_revision"] == 2
+
+    # Now our desktop session attempts to rotate master password using its stale revision 1
+    # Must raise ConflictError, stop update, and refresh latest metadata from server
+    with pytest.raises(ConflictError) as exc_info:
+        await session.rotate_vault_master_password("DesktopNewPass!")
+
+    assert "Conflict" in str(exc_info.value)
+
+    # Invariant: Desktop refreshed its observed revision to 2, salt to other device's salt
+    assert session.vault_key_version == 2
+    assert session.kdf_salt == salt_b64
+    assert session.wrapped_vault_key == new_wrap.to_json()
+
+
+@pytest.mark.anyio
+async def test_sec_new_02_desktop_client_receives_conflict_error_on_stale_update(integration_app):
+    """Verify that desktop ApiClient raises ConflictError on HTTP 409."""
+    app, _ = integration_app
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as raw_client:
+        username = f"desk_test_{uuid.uuid4().hex[:6]}"
+        vek = VaultKey.generate()
+        salt = generate_salt()
+        params = Argon2Params(memory_cost=16384, time_cost=1, parallelism=2, salt=salt)
+        kek = derive_kek("TestMasterPass1!", params)
+        wrap_json = wrap_vault_key(vek, kek, params).to_json()
+
+        reg_res = await raw_client.post("/api/v1/auth/register", json={
+            "username": username,
+            "account_password": "AccountPassword123!",
+            "kdf_salt": b64encode(salt),
+            "wrapped_vault_key": wrap_json,
+        })
+        assert reg_res.status_code == 201
+
+        login_res = await raw_client.post("/api/v1/auth/login", json={
+            "username": username,
+            "account_password": "AccountPassword123!",
+        })
+        token = login_res.json()["session_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        rec_id = f"desk-rec-conflict-{uuid.uuid4().hex[:6]}"
+
+        def _make_env(title: str) -> str:
+            return encrypt_record(
+                record_id=rec_id,
+                plaintext=f'{{"title":"{title}","username":"u","password":"p"}}'.encode("utf-8"),
+                vault_key=vek,
+            ).to_json()
+
+        # Create record
+        create_res = await raw_client.post("/api/v1/records", headers=headers, json={
+            "record_id": rec_id,
+            "ciphertext_payload": _make_env("Initial"),
+        })
+        assert create_res.status_code == 201
+
+        # Remote update to revision 2
+        put_res = await raw_client.put(f"/api/v1/records/{rec_id}", headers=headers, json={
+            "expected_revision": 1,
+            "ciphertext_payload": _make_env("Remote Update"),
+        })
+        assert put_res.status_code == 200
+
+        # Test desktop ApiClient update_record with stale revision 1
+        client = ApiClient(base_url="http://127.0.0.1:8000", transport=transport)
+        client.session_token = token
+
+        with pytest.raises(ConflictError) as exc_info:
+            await client.update_record(
+                record_id=rec_id,
+                expected_revision=1,
+                ciphertext_payload=_make_env("Local Stale Update"),
+            )
+
+        assert exc_info.value.status_code == 409
+        assert "expected revision 1, but current revision is 2" in str(exc_info.value)
+
 
