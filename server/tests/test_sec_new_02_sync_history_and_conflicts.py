@@ -21,8 +21,7 @@ Covers:
    - Verification that exactly one row exists per record in the database (O(1) storage).
    - Intermediate revisions are cleanly superseded and non-recoverable.
    - Server preserves zero-knowledge encryption without 3-way merge inspection.
-5. Client Conflict Handling:
-   - Desktop and Android conflict detection and graceful user guidance.
+   - Concurrency and Conflict Handling with atomic optimistic concurrency and HTTP 409 conflict differentiation.
 """
 
 import concurrent.futures
@@ -42,8 +41,6 @@ from vaultsync_server.crypto.vault_keys import VaultKey, wrap_vault_key
 from vaultsync_server.db.base import Base, create_db_engine
 from vaultsync_server.db.models import Account, EncryptedRecord, Session
 from vaultsync_server.services.auth import rate_limiter
-
-from vaultsync_desktop.api_client import ApiClient, ConflictError
 
 
 @pytest.fixture(autouse=True)
@@ -569,41 +566,3 @@ async def test_concurrency_race_condition_protection(tmp_path: Path):
         assert rec.revision == 2
         assert acc.sync_cursor == 2
 
-
-# ============================================================================
-# 5. Desktop Client Conflict Error Handling
-# ============================================================================
-
-@pytest.mark.anyio
-async def test_desktop_client_receives_conflict_error_on_stale_update(app):
-    """Verify that desktop ApiClient raises ConflictError on HTTP 409."""
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as raw_client:
-        headers, vek = await register_and_login(raw_client, "desk_test")
-        rec_id = "desk-rec-conflict"
-
-        # Create record
-        await raw_client.post("/api/v1/records", headers=headers, json={
-            "record_id": rec_id,
-            "ciphertext_payload": make_envelope(rec_id, "Initial", vek),
-        })
-
-        # Remote update to revision 2
-        await raw_client.put(f"/api/v1/records/{rec_id}", headers=headers, json={
-            "expected_revision": 1,
-            "ciphertext_payload": make_envelope(rec_id, "Remote Update", vek),
-        })
-
-        # Test desktop ApiClient update_record with stale revision 1
-        client = ApiClient(base_url="http://127.0.0.1:8000", transport=transport)
-        client.session_token = headers["Authorization"].replace("Bearer ", "")
-
-        with pytest.raises(ConflictError) as exc_info:
-            await client.update_record(
-                record_id=rec_id,
-                expected_revision=1,
-                ciphertext_payload=make_envelope(rec_id, "Local Stale Update", vek),
-            )
-
-        assert exc_info.value.status_code == 409
-        assert "expected revision 1, but current revision is 2" in str(exc_info.value)

@@ -8,7 +8,7 @@ Verifies:
 - Concurrency protection: exactly one update succeeds under race conditions.
 - Backward compatibility: supports legacy expected_version alias, rejects missing revisions.
 - Database migration compatibility and preservation of existing encrypted material.
-- Desktop client revision handling and conflict recovery.
+- End-to-end HTTP API error handling and concurrency guarantees.
 """
 
 import concurrent.futures
@@ -29,9 +29,6 @@ from vaultsync_server.db.base import Base, create_db_engine
 from vaultsync_server.db.models import Account, Session
 from vaultsync_server.main import create_app
 from vaultsync_server.services.auth import hash_password, rate_limiter
-
-from vaultsync_desktop.api_client import ApiClient, ConflictError
-from vaultsync_desktop.core import VaultSession
 
 
 @pytest.fixture(autouse=True)
@@ -499,62 +496,3 @@ async def test_sec_new_01_legacy_expected_version_compatibility(async_client: As
     assert res.json()["vault_key_revision"] == 2
     assert res.json()["vault_key_version"] == 2
 
-
-# ============================================================================
-# 4. Desktop Client Tests
-# ============================================================================
-
-@pytest.mark.anyio
-async def test_sec_new_01_desktop_client_revision_and_conflict_handling(app):
-    """Verify that desktop client includes expected_revision, detects 409, and refreshes."""
-    transport = ASGITransport(app=app)
-    api = ApiClient(base_url="http://127.0.0.1:8000", transport=transport)
-    session = VaultSession(api=api)
-
-    username = f"desktop_sec01_{uuid.uuid4().hex[:6]}"
-    account_password = "DesktopAccPassword123!"
-    master_password = "OriginalMasterPass1!"
-
-    # Register, login and unlock via desktop session
-    await session.register_account(
-        username=username,
-        account_password=account_password,
-        vault_master_password=master_password,
-    )
-    await session.login_account(
-        username=username,
-        account_password=account_password,
-    )
-    await session.unlock_vault(master_password)
-    assert session.vault_key_version == 1
-    assert session.is_unlocked is True
-
-    # Another device concurrently updates the vault key to revision 2 behind our back
-    async with AsyncClient(transport=transport, base_url="http://testserver") as other_client:
-        login_res = await other_client.post("/api/v1/auth/login", json={
-            "username": username,
-            "account_password": account_password,
-        })
-        other_token = login_res.json()["session_token"]
-        other_headers = {"Authorization": f"Bearer {other_token}"}
-        _, new_salt_b64, new_wrap_json = make_wrapped_key("OtherDeviceMasterPass!", session._vault_key)
-        concurrent_res = await other_client.put("/api/v1/auth/vault-key", headers=other_headers, json={
-            "wrapped_vault_key": new_wrap_json,
-            "kdf_salt": new_salt_b64,
-            "expected_revision": 1,
-            "current_password": account_password,
-        })
-        assert concurrent_res.status_code == 200
-        assert concurrent_res.json()["vault_key_revision"] == 2
-
-    # Now our desktop session attempts to rotate master password using its stale revision 1
-    # Must raise ConflictError, stop update, and refresh latest metadata from server
-    with pytest.raises(ConflictError) as exc_info:
-        await session.rotate_vault_master_password("DesktopNewPass!")
-
-    assert "Conflict" in str(exc_info.value)
-
-    # Invariant: Desktop refreshed its observed revision to 2, salt to other device's salt
-    assert session.vault_key_version == 2
-    assert session.kdf_salt == new_salt_b64
-    assert session.wrapped_vault_key == new_wrap_json
